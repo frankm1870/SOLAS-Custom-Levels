@@ -21,6 +21,7 @@ Valid tilenames and parameters:
 * `powernode id`, one of the large ringed tiles that destroys all glitches in its room. The parameter determines what the number of the powernode is. Upon being triggered all doors of the same id will be opened.
 * `combolock id position`, creates a combination lock tile like the ones at the end of the secret area from the green branch. The id parameter should refer to a combolock group defined earlier in the file (more information below), and the position parameter is what "digit" in the code this tile is.
 * `empty`
+
 Parameters should only be specified with their value and nothing else.
 For combolock groups, the syntax is `*combolock groupid code glitchPositions`, the code should be specified by converting the colors to numbers (r = 1, g = 2, y = 3, b = 4, m = 5, c = 6, w = 7, X = 0). The glitchPositions parameter should be a space separated list of the positions of the glitches to be destroyed when the code is correctly entered.
 (E.g. `*combolock 1 163 32,232 33,232`)
