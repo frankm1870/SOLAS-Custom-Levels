@@ -9,13 +9,11 @@ using System.IO;
 using System.Reflection;
 using System.Reflection.Emit;
 using IL = System.Reflection.Emit;
-using System.Security.Authentication.ExtendedProtection;
 using UnityEngine;
 using UnityEngine.UIElements;
 using System.Runtime.CompilerServices;
 using UnityEditor;
 using SOLASCustomLevels;
-//using CustomPieces;
 using System.Linq;
 using MonoMod.Utils;
 using System.Text;
@@ -27,6 +25,15 @@ using System.Text.RegularExpressions;
 using System.CodeDom;
 using static GlobalVariables;
 using System.Dynamic;
+using Microsoft.CSharp;
+using System.ComponentModel;
+using ICSharpCode.Decompiler;
+using ICSharpCode.Decompiler.CSharp;
+using System.CodeDom.Compiler;
+using Mono.Reflection;
+
+
+
 #if CUSTOMPIECES
 using CustomPieces;
 using CustomPieces.BuiltInPieces;
@@ -34,7 +41,7 @@ using CustomPieces.BuiltInPieces;
 
 namespace SOLASCustomLevels
 {
-    public enum Tiles
+	public enum Tiles
     {
         Empty = 0,
         NoPlace = 1,
@@ -49,13 +56,20 @@ namespace SOLASCustomLevels
     public delegate void MoveController(InteractableController controller);
     public delegate void FadeController(InteractableController controller, bool fade);
 
+	public class OnKeyPressEventArgs : EventArgs
+	{
+		public string keyCodes;
+		public GameController gc;
+	}
+
     [BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
     [BepInProcess("SOLAS 128.exe")]
     public class Plugin : BaseUnityPlugin
     {
-        internal static ConfigEntry<bool> configDoChanges;
+		public const int DEFAULT_FREQUENCY = 4;
+		internal static ConfigEntry<bool> configDoChanges;
         internal static ConfigEntry<string> configFilePath;
-        internal static ManualLogSource logger;
+        public static ManualLogSource logger;
         internal static ConfigEntry<bool> configSkipIntro;
         internal static ConfigEntry<bool> configDebugMode;
         internal static ConfigEntry<string> configZoneFilePath;
@@ -67,9 +81,19 @@ namespace SOLASCustomLevels
         public static Tuple<string, List<Location>, int, int>[,] comboLocks = new Tuple<string, List<Location>, int, int>[253, 253];
         public static Dictionary<int, string> codeStorages = [];
         public static Dictionary<int, Location> doorIDs = [];
-        public static Dictionary<Type, GameObject> controllerTemplates = [];
         public static Dictionary<Type, Dictionary<Location, object>> extraData = [];
         public static GameController gc;
+        static bool GameStarted = false;
+        public static Material GlitchMaterial;
+        public static GameObject RotateQuad;
+        public static GameObject MoveQuad;
+		public static Material[] OrigMiniCannonColors;
+		public static Dictionary<Location, GlitchController> destroyedGlitches = [];
+		internal static ConfigEntry<string> configShowMapKey;
+		public static event EventHandler<GameController> OnGameStart;
+		public static event EventHandler<OnKeyPressEventArgs> OnKeyPress;
+		static bool inMapScreen = false;
+		internal static string gameSource = "";
         //public static Dictionary<int, Tuple<Location, List<Location>>> bossPhases = new();
         //public static Type AnimateTo0Enumerator = typeof(MirrorController).GetNestedType("\'<AnimateToPosition0>d__19\'", BindingFlags.NonPublic);
 
@@ -81,14 +105,17 @@ namespace SOLASCustomLevels
             FileLog.Reset();
             logger = Logger;
             Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
-            configDoChanges = Config.Bind("LevelLoading", "doChanges", true, "Whether to modify level data upon loading a file");
-            configFilePath = Config.Bind("LevelLoading", "filePath", Paths.GameRootPath + @"\level_mods.lvl", "The level to load");
+            configDoChanges = Config.Bind("LevelLoading", "doChanges", true, "Whether to modify level data upon loading a file.");
+            configFilePath = Config.Bind("LevelLoading", "filePath", Paths.GameRootPath + @"\level_mods.lvl", "The level to load.");
             configSkipIntro = Config.Bind("GameLoading", "skipIntro", true, "Whether to skip the intro upon loading a new file.\nRequired if the area near the intro cutscene is modified.");
-            configDebugMode = Config.Bind("DebugMode", "debugMode", false, "Whether a new file should be created with every room unlocked to be moved to via the map");
-            configZoneFilePath = Config.Bind("LevelLoading", "zoneFilePath", Paths.GameRootPath + @"\zones.zone", "The file containing zone modifications to load");
+            configDebugMode = Config.Bind("DebugMode", "debugMode", false, "Whether a new file should be created with every room unlocked to be moved to via the map.");
+            configZoneFilePath = Config.Bind("LevelLoading", "zoneFilePath", Paths.GameRootPath + @"\zones.zone", "The file containing zone modifications to load.");
+			//configShowMapKey = Config.Bind("Keybindings", "showMapKey", "\\", "Keybinding to show the screen shown after activating a power node.");
             Harmony harmony = new("SolasLevelEditor");
             harmony.PatchAll(Assembly.GetExecutingAssembly());
             instance = this;
+			OnKeyPress += OnMapKeyPressed;
+
             //CustomPieces.Add(typeof(VerticalMirrorController));
             comboLocks[228, 8] = new("0351", [new(230, 2), new(232, 2), new(234, 2)], 0, -1);
             comboLocks[230, 8] = new("0351", [new(230, 2), new(232, 2), new(234, 2)], 1, -1);
@@ -111,10 +138,75 @@ namespace SOLASCustomLevels
             doorIDs[6] = new(114, 133);
             doorIDs[7] = new(114, 10);
             doorIDs[8] = new(124, 10);
+			extraData[typeof(EmitterReceiver)] = [];
+			extraData[typeof(EmitterController)] = [];
+
+			//var decompiler = new CSharpDecompiler(Path.Combine(Paths.ManagedPath, "Assembly-CSharp.dll"), new DecompilerSettings());
+			//gameSource = decompiler.DecompileWholeModuleAsString();
+
 #if CUSTOMPIECES
-            controllerTemplates.Add(typeof(TextController), MakeControllerBase<TextController>());
             CustomPieces.Add(typeof(TextController));
+            var modsPath = Paths.PluginPath;
+            logger.LogInfo("Mods path " + modsPath + " exists: " + Directory.Exists(modsPath));
+            if (!Directory.Exists(modsPath))
+                Directory.CreateDirectory(modsPath);
+            foreach (var file in new DirectoryInfo(modsPath).GetFiles("*.dll", SearchOption.AllDirectories))
+            {
+                var asm = Assembly.LoadFrom(file.FullName);
+                var types = asm.GetTypes();
+                var customPieceTypes = types.Where((Type type) => type.BaseType == typeof(CustomController) && type.GetCustomAttribute<CustomPieceAttribute>() is not null);
+                if (!customPieceTypes.Any())
+                    continue;
+                foreach (var type in customPieceTypes)
+                {
+                    CustomPieces.Add(type);
+                }
+            }
 #endif
+        }
+
+		void OnDisable()
+		{
+			OnKeyPress -= OnMapKeyPressed;
+		}
+
+        public static Mesh MakeLine(float x1, float y1, float x2, float y2, float thickness, Mesh mesh = null)
+        {
+			mesh = mesh != null ? mesh : new Mesh();
+
+            float angle = 90 * Mathf.Deg2Rad + Mathf.Atan2(y2 - y1, x2 - x1);
+            float xOffset = Mathf.Cos(angle) * thickness;
+            float yOffset = Mathf.Sin(angle) * thickness;
+
+            Vector3[] vertices =
+            [
+                new Vector3(x1 - xOffset, y1 - yOffset, 0),
+                new Vector3(x1 + xOffset, y1 + yOffset, 0),
+                new Vector3(x2 + xOffset, y2 + yOffset, 0),
+                new Vector3(x2 - xOffset, y2 - yOffset, 0),
+            ];
+
+            mesh.vertices = vertices;
+            mesh.triangles = [0, 1, 2, 2, 3, 0];
+            mesh.normals = [-Vector3.forward, -Vector3.forward, -Vector3.forward, -Vector3.forward];
+            mesh.uv = [new(0, 0), new(1, 0), new(0, 1), new(1, 1)];
+            mesh.UploadMeshData(false);
+
+			return mesh;
+        }
+
+        public static Mesh MakeLine(Vector2 p1, Vector2 p2, float thickness) => MakeLine(p1.x, p1.y, p2.x, p2.y, thickness);
+
+        public static Mesh MakeBox(Vector2 bl, Vector2 tl, Vector2 tr, Vector2 br, float thickness)
+        {
+            Mesh mesh = new();
+
+            mesh.CombineMeshes([new() { mesh = MakeLine(bl - new Vector2(0, thickness), tl + new Vector2(0, thickness), thickness) },
+				new() { mesh = MakeLine(tl - new Vector2(thickness, 0), tr + new Vector2(thickness, 0), thickness) },
+				new() { mesh = MakeLine(tr + new Vector2(0, thickness), br - new Vector2(0, thickness), thickness) },
+				new() { mesh = MakeLine(br + new Vector2(thickness, 0), bl - new Vector2(thickness, 0), thickness) }], true, false);
+			mesh.UploadMeshData(false);
+            return mesh;
         }
 
         public static GameObject MakeControllerBase<T>() where T : MonoBehaviour
@@ -125,18 +217,62 @@ namespace SOLASCustomLevels
         }
 
         void Update()
-        {
-            if (gc == null)
+		{
+			if (Input.anyKeyDown)
+			{
+				OnKeyPress?.Invoke(this, new() { keyCodes = Input.inputString, gc = gc });
+			}
+			if (gc == null)
                 return;
             var controller = AccessTools.Field(typeof(GameController), "selectedInteractable").GetValue(gc) as InteractableController;
             var clickState = AccessTools.Field(typeof(GameController), "currentClickState").GetValue(gc) as int?;
-            switch(controller)
+            switch (controller)
             {
                 
             }
         }
 
-        public void switchVal<T>(T value, Dictionary<T, Action> cases, Action defaultAction = null)
+        public void GameStart()
+        {
+            GameStarted = true;
+            logger.LogInfo("Game has been started");
+            RotateQuad = gc.levelBuilder.MirrorPiece.GetComponent<MirrorController>().RotateQuad;
+            MoveQuad = gc.levelBuilder.MirrorPiece.GetComponent<MirrorController>().MoveQuad;
+			{
+				var miniCannon = gc.levelBuilder.MiniCannonPiece.GetComponent<MiniCannonController>();
+				OrigMiniCannonColors = new Material[3];
+				for (int i = 0; i < 3; i++)
+				{
+					OrigMiniCannonColors[i] = Instantiate(miniCannon.Rings[i].material);
+				}
+			}
+            logger.LogInfo("Camera is at " + Camera.allCameras[0].transform.position);
+			OnGameStart?.Invoke(this, gc);
+        }
+
+		public void OnMapKeyPressed(object sender, OnKeyPressEventArgs args)
+		{
+			//var key = args.keyCodes.ToCharArray();
+			//if (!key.Contains(configShowMapKey.Value.Single()))
+			//{
+			//	return;
+			//}
+			//var gc = args.gc;
+			//if (gc is null)
+			//{
+			//	return;
+			//}
+			//if (!inMapScreen)
+			//{
+			//	inMapScreen = true;
+			//	var worldBuilder = AccessTools.Field(typeof(GameController), "worldBuilder").GetValue(gc) as MeshBuilder;
+			//	var pauseController = AccessTools.Field(typeof(GameController), "pauseController").GetValue(gc) as PauseController;
+			//	var pulseLocations = AccessTools.Field(typeof(GameController), "pulseLocations").GetValue(gc) as List<Location>;
+			//	StartCoroutine(new RevCompPatch_GameControllerShowWorld());
+			//}
+		}
+
+        public static void SwitchVal<T>(T value, Dictionary<T, Action> cases, Action defaultAction = null)
         {
             if (cases.ContainsKey(value))
                 cases[value]();
@@ -188,6 +324,7 @@ namespace SOLASCustomLevels
                             string dir = "up";
                             bool moveable = false;
                             bool rotateable = false;
+							int frequency = 0;
                             bool flips = false;
                             string color = "void";
                             int type = 0;
@@ -235,6 +372,9 @@ namespace SOLASCustomLevels
                                     dir = args[0];
                                     color = args[1];
                                     moveable = bool.Parse(args[2]);
+									frequency = int.Parse(args[3]);
+									controllerType = typeof(EmitterController);
+									extraData = frequency;
                                     if (moveable)
                                         theseShouldBeMoveable = true;
                                     tileID += 10 * color switch
@@ -262,6 +402,9 @@ namespace SOLASCustomLevels
                                     tileID = 0;
                                     dir = args[0];
                                     color = args[1];
+									frequency = int.Parse(args[2]);
+									controllerType = typeof(EmitterController);
+									extraData = frequency;
                                     tileID += 10 * color switch
                                     {
                                         "red" => 1,
@@ -411,8 +554,9 @@ namespace SOLASCustomLevels
                                     throw new NotSupportedException("Range syntax is not supported for power node doors");
                                 doorIDs[doorID] = new Location(int.Parse(coords[0].Trim()) * 14 + int.Parse(coordsX[0].Trim()), int.Parse(coords[1].Trim()) * 14 + int.Parse(coordsY[0].Trim()));
                             }
-                            else if (tileID < -1)
+                            else if (extraData is not null)
                             {
+                                Plugin.extraData.TryAddValue(controllerType, []);
                                 Plugin.extraData[controllerType][new Location(int.Parse(coords[0].Trim()) * 14 + int.Parse(coordsX[0].Trim()), int.Parse(coords[1].Trim()) * 14 + int.Parse(coordsY[0].Trim()))] = extraData;
                             }
                             logger.LogInfo("Replacing range '" + coordsX[0] + ", " + ((coordsX.Length == 2) ? int.Parse(coordsX[1].Trim()) : int.Parse(coordsX[0].Trim())) + "', '" + coordsY[0] + ", " + ((coordsY.Length == 2) ? int.Parse(coordsY[1].Trim()) : int.Parse(coordsY[0].Trim())) + "'");
@@ -548,7 +692,91 @@ namespace SOLASCustomLevels
         }
     }
 
-    /*[HarmonyPatch(typeof(TesseractController), "FindMirrorsForBoss")]
+	//public class RevCompPatch_GameControllerShowWorld : IEnumerator
+	//{
+	//	public int state;
+	//	public
+
+	//	object current;
+
+	//	public object Current => current;
+
+	//	public void Reset()
+	//	{
+	//		throw new NotImplementedException();
+	//	}
+
+	//	bool IEnumerator.MoveNext()
+	//	{
+	//		IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instrs)
+	//		{
+	//			var code = Plugin.gameSource;
+	//			var showWorldIndex = code.IndexOf("private IEnumerator ShowWorld(int nodeActivated)");
+	//			var startOfMethod = code.IndexOf("GlobalVariables", showWorldIndex);
+	//			var endOfDesiredPortion = code.IndexOf("createNewPulses();", showWorldIndex) + "createNewPulses();".Length;
+	//			var desiredPortion = code.Substring(startOfMethod, endOfDesiredPortion - startOfMethod);
+	//			var provider = new CSharpCodeProvider();
+	//			var newCode = $$"""
+	//				public class Temp
+	//				{
+	//					public static int nodeActivated;
+	//					public static PauseIconController pauseIconController;
+	//					public static HintIconController hintIconController;
+	//					public static PauseIconController helpIconController;
+	//					public static TimeTravelUIController fastForwardIconController;
+	//					public static TimeTravelUIController undoIconController;
+
+	//					public static GameObject WishlistURLIconGo;
+	//					public static WishlistURLController wishlistURLController;
+	//					public static GameObject saveIconGO;
+	//					public static SaveIconController saveIconController;
+	//					public static AudioController ac;
+
+	//					public static GameObject pauseIconGO;
+	//					public static GameObject hintIconGO;
+	//					public static GameObject helpIconGO;
+	//					public static GameObject fastForwardIconGO;
+	//					public static GameObject undoIconGO;
+
+	//					public static GameObject LeftFog;
+	//					public static GameObject RightFog;
+
+	//					public static bool PulseGoo;
+
+	//					public static bool gameStarted;
+
+	//					public static MeshBuilder worldBuilder;
+	//					public void Method()
+	//					{
+	//						{{code}}
+	//					}
+
+	//					public static void StartCoroutine(IEnumerator routine) {}
+	//					public static void moveAllPulses() {}
+	//					public static void createNewPulses() {}
+	//				}
+	//				""";
+	//			var compiled = provider.CompileAssemblyFromSource(new CompilerParameters(), newCode);
+	//			foreach (var error in compiled.Errors)
+	//			{
+	//				Plugin.logger.LogError("Error recompiling GameControllerShowWorld.MoveNext: " + error);
+	//				return instrs;
+	//			}
+	//			var newMethod = compiled.CompiledAssembly.GetTypes()[0].GetMethod("Method");
+	//			var newInstrsEarly = newMethod.GetInstructions();
+	//			var newInstrs = new List<CodeInstruction>();
+	//			foreach (var instr in newInstrsEarly)
+	//			{
+	//				newInstrs.Add(new CodeInstruction(instr.OpCode, instr.Operand));
+	//			}
+	//			return newInstrs.TranspileEnumerator<RevCompPatch_GameControllerShowWorld>();
+	//		}
+	//		_ = Transpiler(null);
+	//		return false;
+	//	}
+	//}
+
+	/*[HarmonyPatch(typeof(TesseractController), "FindMirrorsForBoss")]
     public class Patch_FindMirrorsForBoss
     {
         public static bool Prefix()
@@ -582,7 +810,7 @@ namespace SOLASCustomLevels
         }
     }*/
 
-    [HarmonyPatch(typeof(PowerNodeController), "TurnOnIfNecessary")]
+	[HarmonyPatch(typeof(PowerNodeController), "TurnOnIfNecessary")]
     public class Patch_TurnOnIfNecessary
     {
         public static Exception Finalizer(Exception __exception)
@@ -613,6 +841,12 @@ namespace SOLASCustomLevels
                 new CodeInstruction(Ldarg_1),
                 new CodeInstruction(Ldarg_2),
                 new CodeInstruction(Call, AccessTools.Method(typeof(Patch_checkForPulseToPieceCollision), "Temp")));
+            matcher.End();
+            matcher.Advance(-3);
+            matcher.Insert(
+                new CodeInstruction(Ldarg_1),
+                new CodeInstruction(Ldarg_2),
+                new CodeInstruction(Call, AccessTools.Method(typeof(Patch_checkForPulseToPieceCollision), "Temp2")));
             return matcher.InstructionEnumeration();
         }
 
@@ -621,6 +855,16 @@ namespace SOLASCustomLevels
             var controller = (NodeDoorController)GetInteractableControllerAt(x, y);
             return (int)AccessTools.Field(typeof(NodeDoorController), "NodeNumber").GetValue(controller);
         }
+
+        public static byte Temp2(byte pulse, int x, int y)
+        {
+            var controller = GetInteractableControllerAt(x, y);
+            if (controller is IPulseInteractable modifier and CustomController)
+            {
+                modifier.HandlePulseCollision(ref pulse);
+            }
+            return pulse;
+        }
     }
 
     [HarmonyPatch(typeof(GameController), "BuildLevel")]
@@ -628,6 +872,7 @@ namespace SOLASCustomLevels
     {
         public static void Prefix(ref int[] level, GameController __instance)
         {
+            Plugin.instance.GameStart();
             bool isFirstLoad = (bool)typeof(GameController).GetField("showFullIntro", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(__instance);
             if (isFirstLoad)
             {
@@ -653,18 +898,17 @@ namespace SOLASCustomLevels
     [HarmonyPatch(typeof(GameController), "Start")]
     public class Patch_GameControllerStart
     {
+        public static void Prefix(GameController __instance)
+        {
+            Plugin.gc = __instance;
+        }
+
         public static void Postfix(GameController __instance)
         {
             ((GameObject)AccessTools.Field(typeof(GameController), "undoIconGO").GetValue(__instance)).SetActive(true);
             ((GameObject)AccessTools.Field(typeof(GameController), "fastForwardIconGO").GetValue(__instance)).SetActive(true);
             ((GameObject)AccessTools.Field(typeof(GameController), "helpIconGO").GetValue(__instance)).SetActive(true);
             CurrentGamePhase = 4;
-            Plugin.gc = __instance;
-            var lb = __instance.levelBuilder;
-            foreach (var component in lb.FakeWallPiece.GetComponents(typeof(Component)))
-            {
-                Plugin.logger.LogInfo(component.ToString());
-            }
         }
     }
 
@@ -690,6 +934,8 @@ namespace SOLASCustomLevels
         {
             if (Plugin.configDebugMode.Value)
                 Plugin.UnlockMap();
+            EnableInteractablesAtScreen(3, 16, true);
+            FadeInAllPiecesAtScreen(3, 16);
         }
     }
 
@@ -732,13 +978,19 @@ namespace SOLASCustomLevels
         {
             __instance.BaseLocation = new Vector3(tileX, -tileY, __instance.BaseLocation.z);
             __instance.VisibleLocation = __instance.BaseLocation;
+            /*AccessTools.Method(typeof(InteractableController), "AddPieceToFade").Invoke(__instance, [
+                ((GameObject)AccessTools.Field(typeof(TeleportController), "InnerRing").GetValue(__instance)).GetComponent<MeshRenderer>()
+                ]);
+            AccessTools.Method(typeof(InteractableController), "AddPieceToFade").Invoke(__instance, [
+                ((GameObject)AccessTools.Field(typeof(TeleportController), "OuterRing").GetValue(__instance)).GetComponent<MeshRenderer>()
+                ]);*/
         }
     }
 
     [HarmonyPatch(typeof(EmitterController), nameof(EmitterController.SetupPiece))]
     public class Patch_EmitterControllerSetupPiece
     {
-        public static void Prefix(ref bool drag, int tileX, int tileY)
+        public static void Prefix(ref bool drag, int tileX, int tileY, EmitterController __instance)
         {
             drag = Plugin.moveableTiles[tileX, tileY];
         }
@@ -751,10 +1003,19 @@ namespace SOLASCustomLevels
             return instrs;
         }
 
-        public static void Postfix(EmitterController __instance, int tileX, int tileY)
+        public static void Postfix(EmitterController __instance, int tileX, int tileY, bool drag)
         {
             __instance.BaseLocation = new Vector3(tileX, -tileY, __instance.BaseLocation.z);
             __instance.VisibleLocation = __instance.BaseLocation;
+            var moveObject = GameObject.Instantiate(Plugin.MoveQuad, __instance.transform);
+            moveObject.transform.position = new(__instance.transform.position.x, __instance.transform.position.y + 0.125f, moveObject.transform.position.z);
+            moveObject.SetActive(drag);
+            /*AccessTools.Method(typeof(InteractableController), "AddPieceToFade").Invoke(__instance, [
+                ((GameObject)AccessTools.Field(typeof(EmitterController), "EmitterQuads").GetValue(__instance)).GetComponent<MeshRenderer>()
+                ]);
+            AccessTools.Method(typeof(InteractableController), "AddPieceToFade").Invoke(__instance, [
+                ((GameObject)AccessTools.Field(typeof(EmitterController), "ReceiverQuads").GetValue(__instance)).GetComponent<MeshRenderer>()
+                ]);*/
         }
     }
 
@@ -798,9 +1059,20 @@ namespace SOLASCustomLevels
         {
             if (___selectedInteractable is EmitterController ec)
             {
-                ((EmitterReceiver)typeof(EmitterController).GetPrivateField("Emitter", ec)).X = tileX;
-                ((EmitterReceiver)typeof(EmitterController).GetPrivateField("Emitter", ec)).Y = tileY;
-            }
+				var emitter = (EmitterReceiver)typeof(EmitterController).GetPrivateField("Emitter", ec);
+				emitter.X = tileX;
+                emitter.Y = tileY;
+
+				if (Plugin.extraData[typeof(EmitterController)].TryGetValue(___mouseStartLoc, out var freq))
+				{
+					Plugin.extraData[typeof(EmitterController)][new(tileX, tileY)] = freq;
+				}
+
+				if (Plugin.extraData[typeof(EmitterReceiver)].TryGetValue(___mouseStartLoc, out var beat))
+				{
+					Plugin.extraData[typeof(EmitterReceiver)][new(tileX, tileY)] = beat;
+				}
+			}
             else if (___selectedInteractable is TeleportController)
             {
 #pragma warning disable
@@ -809,6 +1081,17 @@ namespace SOLASCustomLevels
 #pragma warning restore
                 Plugin.teleporters[tileX, tileY] = oldID;
             }
+			else
+			{
+				if (!Plugin.extraData.ContainsKey(___selectedInteractable.GetType()))
+				{
+					Plugin.extraData[___selectedInteractable.GetType()] = [];
+				}
+				if (Plugin.extraData[___selectedInteractable.GetType()].TryGetValue(___mouseStartLoc, out var data))
+				{
+					Plugin.extraData[___selectedInteractable.GetType()][new(tileX, tileY)] = data;
+				}
+			}
         }
     }
 
@@ -877,7 +1160,8 @@ namespace SOLASCustomLevels
         }
     }
 
-    [HarmonyPatch]
+#if CUSTOMPIECES
+	[HarmonyPatch]
     public class RevPatch_WallControllerUpdate
     {
         [HarmonyReversePatch]
@@ -887,25 +1171,29 @@ namespace SOLASCustomLevels
 
         }
     }
+#endif
 
 #if CUSTOMPIECES
-    [HarmonyPatch(typeof(MirrorController), "AnimateToPosition0", MethodType.Enumerator)]
+	[HarmonyPatch(typeof(MirrorController), "AnimateToPosition0", MethodType.Enumerator)]
     public class RevPatch_MirrorControllerAnimateToPosition0
     {
         [HarmonyReversePatch]
-        public static bool AnimateToPosition0(CustomController.RotatePieceEnumerator instance, float angle)
+        public static bool AnimateToPosition0(CustomController.RotatePieceEnumerator instance)
         {
             static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
             {
-                foreach (var instr in new CodeMatcher(instructions)
-                    .MatchForward(false, new CodeMatch(Call))
-                    .Advance(-3)
-                    .SetAndAdvance(Nop, null)
-                    .SetAndAdvance(Nop, null)
-                    .SetAndAdvance(Nop, null)
-                    .SetAndAdvance(Nop, null)
-                    .InstructionEnumeration())
+				var instrs = new CodeMatcher(instructions)
+					.MatchForward(false, new CodeMatch(Call))
+					.Advance(-3)
+					.SetAndAdvance(Nop, null)
+					.SetAndAdvance(Nop, null)
+					.SetAndAdvance(Nop, null)
+					.SetAndAdvance(Nop, null)
+					.InstructionEnumeration().ToArray();
+
+				for (int i = 0; i < instrs.Length; i++)
                 {
+					var instr = instrs[i];
                     if (instr.opcode == Ldc_R4 && (float)instr.operand == 90f)
                     {
                         yield return new CodeInstruction(Ldarg_0);
@@ -923,6 +1211,12 @@ namespace SOLASCustomLevels
                                 case "<>2__current":
                                     newInstr.operand = AccessTools.Field(typeof(CustomController.RotatePieceEnumerator), nameof(CustomController.RotatePieceEnumerator.current)); break;
                                 case "<>4__this":
+									if (((FieldInfo)instrs[i + 1].operand).Name == "RotateGroup")
+									{
+										newInstr.opcode = Nop;
+										newInstr.operand = null;
+										break;
+									}
                                     newInstr.operand = AccessTools.Field(typeof(CustomController.RotatePieceEnumerator), nameof(CustomController.RotatePieceEnumerator.instance)); break;
                                 case "<rotation>5__1":
                                     newInstr.operand = AccessTools.Field(typeof(CustomController.RotatePieceEnumerator), nameof(CustomController.RotatePieceEnumerator.rotation)); break;
@@ -931,7 +1225,7 @@ namespace SOLASCustomLevels
                                 case "<z>5__3":
                                     newInstr.operand = AccessTools.Field(typeof(CustomController.RotatePieceEnumerator), nameof(CustomController.RotatePieceEnumerator.z)); break;
                                 case "RotateGroup":
-                                    newInstr.operand = AccessTools.Field(typeof(CustomController), nameof(CustomController.controllerGO)); break;
+                                    newInstr.operand = AccessTools.Field(typeof(CustomController.RotatePieceEnumerator), nameof(CustomController.RotatePieceEnumerator.go)); break;
                                 case "rotateTime":
                                     newInstr.operand = AccessTools.Field(typeof(CustomController), nameof(CustomController.rotateTime)); break;
                                 default:
@@ -949,7 +1243,44 @@ namespace SOLASCustomLevels
     }
 #endif
 
-    [HarmonyPatch(typeof(LevelBuilder), "BuildLevelASync", MethodType.Enumerator)]
+#if CUSTOMPIECES
+	[HarmonyPatch(typeof(PrismController), nameof(PrismController.PulseHit))]
+	public class RevPatch_PrismControllerPulseHit
+	{
+		[HarmonyReversePatch]
+		public static void ScalePiece(InteractableController instance, float shrinkBy)
+		{
+			IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instrs) => instrs.Manipulator(
+				instr => instr.opcode == Ldc_R4,
+				instr => { instr.opcode = Ldarg_1; instr.operand = null; }
+				).Manipulator(
+				instr => instr.operand is FieldInfo fi && fi == AccessTools.Field(typeof(PrismController), "startSize"),
+				instr => { instr.operand = AccessTools.Field(typeof(CustomController), nameof(CustomController.startSize)); }
+				);
+
+			_ = Transpiler(null);
+		}
+	}
+#endif
+
+#if CUSTOMPIECES
+	[HarmonyPatch(typeof(PrismController), "Update")]
+	public class RevPatch_PrismControllerUpdate
+	{
+		[HarmonyReversePatch]
+		public static void UpdateScale(InteractableController instance)
+		{
+			IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instrs) => instrs.Manipulator(
+				instr => instr.operand is FieldInfo fi && fi == AccessTools.Field(typeof(PrismController), "startSize"),
+				instr => { instr.operand = AccessTools.Field(typeof(CustomController), nameof(CustomController.startSize)); }
+				);
+
+			_ = Transpiler(null);
+		}
+	}
+#endif
+
+	[HarmonyPatch(typeof(LevelBuilder), "BuildLevelASync", MethodType.Enumerator)]
     public class Patch_LevelBuilderBuildLevelASync
     {
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
@@ -957,7 +1288,7 @@ namespace SOLASCustomLevels
             return new CodeMatcher(instructions)
                 .MatchForward(false,
                     new CodeMatch(Call, AccessTools.Method(typeof(LevelBuilder), "CreateTeleport", [typeof(int), typeof(int), typeof(int)])))
-                .Advance(3)
+                .Advance(4)
                 .Insert(
                     new CodeInstruction(Ldarg_0),
                     new CodeInstruction(Ldfld, AccessTools.Field(AccessTools.Method(typeof(LevelBuilder), "BuildLevelASync").GetStateMachineTarget().DeclaringType, "<>4__this")),
@@ -977,12 +1308,117 @@ namespace SOLASCustomLevels
             if (pieceType >= -1)
                 return;
             Type controller = Plugin.GetControllerType(pieceType);
-            
+            var template = new GameObject(controller.Name, controller);
+            Plugin.logger.LogInfo("Attempting creation of pieceType " + pieceType);
+            RevPatch_LevelBuilderBuildLevelASync.CreateControllerTemplate(lb, template, controller, x, y, pieceType);
 #endif
         }
     }
 
-    [HarmonyPatch(typeof(GlyphLockController), nameof(GlyphLockController.SetupPiece))]
+#if CUSTOMPIECES
+    [HarmonyPatch(typeof(LevelBuilder), "BuildLevelASync", MethodType.Enumerator)]
+    public class RevPatch_LevelBuilderBuildLevelASync
+    {
+        [HarmonyReversePatch]
+        public static void CreateControllerTemplate(LevelBuilder lb, GameObject template, Type controller, int x, int y, int pieceType)
+        {
+            IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
+            {
+                var goLoc = generator.DeclareLocal(typeof(GameObject));
+                var ccLoc = generator.DeclareLocal(typeof(CustomController));
+                var matcher = new CodeMatcher(instructions.MethodReplacer(AccessTools.Method(typeof(GameObject), nameof(GameObject.GetComponent), [], [typeof(SquiggleController)]),
+                    AccessTools.Method(typeof(GameObject), nameof(GameObject.GetComponent), [typeof(Type)])));
+                matcher.MatchForward(true, new CodeMatch(Nop), new CodeMatch(Ldarg_0), new CodeMatch(Ldarg_0));
+                matcher.MatchForward(true, new CodeMatch(Nop), new CodeMatch(Ldarg_0), new CodeMatch(Ldarg_0));
+                matcher.MatchForward(true, new CodeMatch(Nop), new CodeMatch(Ldarg_0), new CodeMatch(Ldarg_0));
+                matcher.MatchForward(false, new CodeMatch(Nop), new CodeMatch(Ldarg_0), new CodeMatch(Ldarg_0));
+                matcher.RemoveInstructionsInRange(0, matcher.Pos - 1);
+                matcher = new CodeMatcher(matcher.InstructionEnumeration().Take(51));
+                matcher.Start();
+                matcher.MatchForward(false, new CodeMatch(Ldarg_0));
+                matcher.Repeat((matcher) => { matcher.SetOpcodeAndAdvance(Nop); matcher.Advance(-1); matcher.SetOperandAndAdvance(null); });
+                matcher.Start();
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.SetAndAdvance(Nop, null).Set(Ldarg_1, null);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.SetAndAdvance(Ldarg_3, null).Advance(2).Set(Ldarg_S, 4);
+                matcher.MatchForward(false, new CodeMatch(Stfld));
+                matcher.Set(Stloc_S, goLoc);
+                matcher.Advance(2);
+                matcher.Set(Ldloc_S, goLoc);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_0, null).Advance(2);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldloc_S, goLoc);
+                matcher.Advance(1);
+                matcher.InsertAndAdvance(new CodeInstruction(Ldarg_2));
+                matcher.Advance(1);
+                matcher.InsertAndAdvance(new CodeInstruction(Castclass, typeof(CustomController)));
+                matcher.Set(Stloc_S, ccLoc);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldloc_S, ccLoc);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_3, null);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_S, 4);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_S, 5);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_3, null);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldarg_S, 4);
+                matcher.MatchForward(false, new CodeMatch(Ldfld));
+                matcher.Set(Ldloc_S, ccLoc);
+                matcher.End();
+                matcher.Advance(1);
+                matcher.Insert(new CodeInstruction(Ret));
+
+                var instrs = matcher.InstructionEnumeration();
+                return instrs;
+            }
+
+            _ = Transpiler(null, null);
+        }
+    }
+#endif
+
+#if CUSTOMPIECES
+	[HarmonyPatch(typeof(MirrorController), nameof(MirrorController.ClickPiece))]
+	public class RevPatch_MirrorControllerClickPiece
+	{
+		[HarmonyReversePatch]
+		public static void StopCoroutineSafe(CustomController instance, Coroutine coroutine)
+		{
+			IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+			{
+				var matcher = new CodeMatcher(instructions);
+				matcher.MatchForward(false, [new(Call)]);
+				matcher.RemoveInstructionsInRange(matcher.Pos + 2, matcher.Length - 1);
+				matcher.Start();
+				matcher.MatchForward(false, [new(Ldnull)]);
+				matcher.RemoveInstructions(4);
+				var label = (IL.Label)matcher.Instruction.operand;
+				matcher.End();
+				matcher.SetInstruction(new(Nop, null) { labels = [label] });
+				matcher.Start();
+				matcher.MatchForward(false, [new(null, AccessTools.Field(typeof(MirrorController), "rotateCoroutine"))]);
+				matcher.Repeat((matcher) =>
+				{
+					matcher.Advance(-1);
+					matcher.RemoveInstruction();
+					matcher.SetInstruction(new(Ldarg_1));
+				});
+				matcher.End();
+				matcher.Insert([new(Ret)]);
+				return matcher.InstructionEnumeration();
+			}
+
+			_ = Transpiler(null);
+		}
+	}
+#endif
+
+	[HarmonyPatch(typeof(GlyphLockController), nameof(GlyphLockController.SetupPiece))]
     public class Patch_GlyphLockControllerSetupPiece
     {
         public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instrs)
@@ -1050,7 +1486,7 @@ namespace SOLASCustomLevels
         {
             foreach (var loc in Plugin.comboLocks[controller.TileX, controller.TileY].Item2)
             {
-                ((GlitchController)GetInteractableControllerAt(loc.x, loc.y)).DisableGlitch();
+                ((GlitchController)GetInteractableControllerAt(loc.x, loc.y))?.DisableGlitch();
             }
         }
 
@@ -1145,6 +1581,10 @@ namespace SOLASCustomLevels
 
         public Color initColour;
 
+		public Color origColor;
+
+		public Material origMat;
+
         public float redDiff;
         public float greenDiff;
         public float blueDiff;
@@ -1169,11 +1609,48 @@ namespace SOLASCustomLevels
         {
             IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
             {
-                var matcher = new CodeMatcher(instructions.TranspileEnumerator<RevPatch_DisableRingEnum>(AccessTools.GetDeclaredFields(typeof(RevPatch_DisableRingEnum))));
+				var matcher = new CodeMatcher(instructions.TranspileEnumerator<RevPatch_DisableRingEnum>());
                 matcher.MatchForward(false, new CodeMatch(Sub)).SetInstruction(new(Call, AccessTools.Method(typeof(RevPatch_DisableRingEnum), nameof(RSub))));
                 matcher.MatchForward(false, new CodeMatch(Sub)).SetInstruction(new(Call, AccessTools.Method(typeof(RevPatch_DisableRingEnum), nameof(RSub))));
                 matcher.MatchForward(false, new CodeMatch(Sub)).SetInstruction(new(Call, AccessTools.Method(typeof(RevPatch_DisableRingEnum), nameof(RSub))));
-                return matcher.InstructionEnumeration();
+				matcher.MatchForward(false, new CodeMatch(Ldflda, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "initColour")));
+				matcher.InsertAndAdvance([
+					new(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "instance")),
+					new(Ldfld, AccessTools.Field(typeof(MiniCannonController), "RingTargetMaterial")),
+					new(Callvirt, AccessTools.PropertyGetter(typeof(Material), nameof(Material.color)))
+					]);
+				matcher.SetInstruction(new(Nop));
+				matcher.MatchForward(false, new CodeMatch(Ldflda, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "initColour")));
+				matcher.InsertAndAdvance([
+					new(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "instance")),
+					new(Ldfld, AccessTools.Field(typeof(MiniCannonController), "RingTargetMaterial")),
+					new(Callvirt, AccessTools.PropertyGetter(typeof(Material), nameof(Material.color)))
+					]);
+				matcher.SetInstruction(new(Nop));
+				matcher.MatchForward(false, new CodeMatch(Ldflda, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "initColour")));
+				matcher.InsertAndAdvance([
+					new(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "instance")),
+					new(Ldfld, AccessTools.Field(typeof(MiniCannonController), "RingTargetMaterial")),
+					new(Callvirt, AccessTools.PropertyGetter(typeof(Material), nameof(Material.color)))
+					]);
+				matcher.SetInstruction(new(Nop));
+				matcher.MatchForward(false, new CodeMatch(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "instance")));
+				matcher.SetInstructionAndAdvance(new(Nop));
+				matcher.SetInstruction(new(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "origMat")));
+				matcher.MatchForward(false, new CodeMatch(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "instance")));
+				matcher.SetInstructionAndAdvance(new(Nop));
+				matcher.SetInstruction(new(Ldfld, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "origMat")));
+				matcher.Start();
+				matcher.MatchForward(false, new CodeMatch(Ldflda, AccessTools.Field(typeof(RevPatch_DisableRingEnum), "initColour")));
+				matcher.Repeat((matcher) =>
+				{
+					matcher.SetOperandAndAdvance(AccessTools.Field(typeof(RevPatch_DisableRingEnum), "origColor"));
+				});
+				foreach (var instr in matcher.InstructionEnumeration())
+				{
+					FileLog.Log(instr.ToString());
+				}
+				return matcher.InstructionEnumeration();
             }
 
             _ = Transpiler(null);
@@ -1203,21 +1680,94 @@ namespace SOLASCustomLevels
     [HarmonyPatch(typeof(MiniCannonController), "ClickPiece")]
     public class Patch_MiniCannonControllerClickPiece
     {
-        public static bool Prefix(MiniCannonController __instance, ref int __result)
+        public static bool Prefix(MiniCannonController __instance, ref int __result, ref int ___shotNumber, List<Location> ___foundLocations)
         {
             __result = __instance.TileValue;
-            var shotNumber = AccessTools.Field(typeof(MiniCannonController), "shotNumber").GetValue(__instance) as int?;
-            if (shotNumber <= 0)
+            if (___shotNumber <= 0)
                 return false;
-            Plugin.logger.LogInfo("Resetting mini glitch cannon at " + __instance.TileX + ", " + __instance.TileY + " to shot number " + (shotNumber - 1));
-            shotNumber--;
-            AccessTools.Field(typeof(MiniCannonController), "shotNumber").SetValue(__instance, shotNumber.Value);
-            __instance.StartCoroutine(new RevPatch_DisableRingEnum(0) { instance = __instance, ring = __instance.Rings[shotNumber.Value], totalTime = 1f });
+            Plugin.logger.LogInfo("Resetting mini glitch cannon at " + __instance.TileX + ", " + __instance.TileY + " to shot number " + (___shotNumber - 1));
+            ___shotNumber--;
+            __instance.StartCoroutine(new RevPatch_DisableRingEnum(0)
+			{
+				instance = __instance,
+				ring = __instance.Rings[___shotNumber],
+				totalTime = 1f, origColor = Plugin.OrigMiniCannonColors[___shotNumber].color,
+				origMat = Plugin.OrigMiniCannonColors[___shotNumber] });
+			var lastGlitchLocation = ___foundLocations.Last();
+			___foundLocations.Remove(lastGlitchLocation);
+			RevPatch_LevelBuilderBuildLevelASync.CreateControllerTemplate(Plugin.gc.levelBuilder, Plugin.gc.levelBuilder.GlitchPiece, typeof(GlitchController), lastGlitchLocation.x, lastGlitchLocation.y, 6);
             return false;
         }
     }
 
-    public static class Extensions
+	[HarmonyPatch(typeof(GameController), "Update")]
+	public class Patch_GameControllerUpdate
+	{
+		public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions, ILGenerator gen)
+		{
+			var matcher = new CodeMatcher(instructions);
+
+			matcher.MatchForward(false, new CodeMatch(null, AccessTools.Field(typeof(GameController), "isQuitting")));
+			matcher.Advance(8);
+
+			matcher.MatchForward(false, new CodeMatch(null, AccessTools.Field(typeof(GameController), "timeSinceLastBar")));
+			matcher.Advance(1);
+			matcher.InsertAndAdvance([
+				new(Ldarg_0),
+				new(Call, AccessTools.Method(typeof(GameController), "createNewPulses"))
+				]);
+			matcher.Advance(9);
+			matcher.SetInstructionAndAdvance(new(Nop));
+			matcher.SetInstructionAndAdvance(new(Nop));
+			return matcher.InstructionEnumeration();
+		}
+	}
+
+	[HarmonyPatch(typeof(GameController), "createNewPulses")]
+	public class Patch_GameControllerCreateNewPulses
+	{
+		public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+		{
+			var matcher = new CodeMatcher(instructions);
+			matcher.MatchForward(false, new CodeMatch(Callvirt, AccessTools.PropertyGetter(typeof(EmitterReceiver), nameof(EmitterReceiver.CurrentPower))));
+			matcher.Advance(4);
+			matcher.SetInstructionAndAdvance(new(Ldloc_2));
+			matcher.SetInstructionAndAdvance(new(Call, AccessTools.Method(typeof(Patch_GameControllerCreateNewPulses), nameof(Temp))));
+			matcher.InsertAndAdvance([
+				new(And)
+				]);
+			return matcher.InstructionEnumeration();
+		}
+
+		public static bool Temp(EmitterReceiver emitter)
+		{
+			bool result = false;
+			if (!Plugin.extraData[typeof(EmitterReceiver)].TryGetValue(new(emitter.X, emitter.Y), out _))
+			{
+				Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] = 0;
+			}
+			if (Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] as int? == (Plugin.extraData[typeof(EmitterController)].TryGetValue(new(emitter.X, emitter.Y), out var temp) ? (temp as int?) - 1 : Plugin.DEFAULT_FREQUENCY - 1))
+			{
+				result = true;
+			}
+			Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] = (Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] as int?) + 1;
+			Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] = (Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] as int?) % ((Plugin.extraData[typeof(EmitterController)].TryGetValue(new(emitter.X, emitter.Y), out var temp2) ? temp2 : Plugin.DEFAULT_FREQUENCY) as int?);
+			return result;
+		}
+	}
+
+#if false
+	[HarmonyPatch(typeof(InteractableController), nameof(InteractableController.ActivateInstant))]
+	public class Patch_InteractableControllerActivateInstant
+	{
+		public static void Prefix(InteractableController __instance)
+		{
+			Plugin.logger.LogInfo(__instance.GetType());
+		}
+	}
+#endif
+
+	public static class Extensions
     {
         public static object GetPrivateField(this Type type, string fieldName, object instance = null)
         {
@@ -1268,18 +1818,18 @@ namespace SOLASCustomLevels
         }
 
         /// <summary>
-        /// A transpiler that helps with reverse patching enumerator methods
+        /// A transpiler that helps with reverse patching enumerator methods.
         /// </summary>
-        /// <typeparam name="TEnumerator">The new enumerator type to use. This type's fields should match in name and type with the original method's locals and arguments.</typeparam>
+        /// <typeparam name="TEnumerator">The new enumerator type to use. This type's fields should match in name and type with the original method's locals and arguments, except that the field <code>&lt;&gt;4__this</code> should be matched with a field named <code>instance</code>.</typeparam>
         /// <param name="instrs">An enumerable of the instructions of the enumerator's MoveNext method.</param>
-        /// <param name="locals">A list of FieldInfo objects representing both the local variables and parameters of the method. Use the readable name of local variables rather than the compiler generated name. The field '<>#__this' should be matched with a field called 'instance'</param>
         /// <returns>An enumerable containing the instructions of the MoveNext method, with field access instructions replaced to access the new enumerator's fields.</returns>
-        public static IEnumerable<CodeInstruction> TranspileEnumerator<TEnumerator>(this IEnumerable<CodeInstruction> instrs, IEnumerable<FieldInfo> locals) where TEnumerator : IEnumerator
+        public static IEnumerable<CodeInstruction> TranspileEnumerator<TEnumerator>(this IEnumerable<CodeInstruction> instrs) where TEnumerator : IEnumerator
         {
             foreach (var instr in instrs)
             {
                 var newInstr = new CodeInstruction(instr);
-                if (instr.operand is null || instr.operand is not FieldInfo)
+				var locals = AccessTools.GetDeclaredFields(typeof(TEnumerator));
+                if (instr.operand is null or not FieldInfo)
                 {
                     yield return instr;
                     continue;
@@ -1299,11 +1849,11 @@ namespace SOLASCustomLevels
                             var fieldName = ((FieldInfo)instr.operand).Name;
                             if (pattern.IsMatch(fieldName))
                             {
-                                newInstr.operand = AccessTools.Field(typeof(TEnumerator), local.Name);
+                                newInstr.operand = local;
                             }
                             else if (fieldName == local.Name)
                             {
-                                newInstr.operand = AccessTools.Field(typeof(TEnumerator), local.Name);
+                                newInstr.operand = local;
                             }
                         }
                         break;
@@ -1311,8 +1861,24 @@ namespace SOLASCustomLevels
                 yield return newInstr;
             }
         }
+
+        public static bool TryAddValue<T1, T2>(this Dictionary<T1, T2> dict, T1 key, T2 value)
+        {
+            bool result;
+            if (result = !dict.TryGetValue(key, out _))
+                dict.Add(key, value);
+            return result;
+        }
     }
 }
+
+#region FixRecords
+namespace System.Runtime.CompilerServices
+{
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    internal class IsExternalInit { }
+}
+#endregion
 
 #if CUSTOMPIECES
 namespace CustomPieces
@@ -1328,7 +1894,9 @@ namespace CustomPieces
         public float rotateTime;
 
         public abstract List<int> Global_GetTileIDs();
-        public GameObject controllerGO = null;
+        public GameObject rotateObject;
+        public GameObject moveObject;
+		public Vector3 startSize = Vector3.one;
 
         public override void CheatComplete() { }
         public override void ActivatePiece()
@@ -1340,11 +1908,22 @@ namespace CustomPieces
             StartCoroutine(DeactivatePieceCR());
         }
 
-        public IEnumerator Rotate(float angle)
+		public void StopCoroutineSafe(Coroutine coroutine)
+		{
+			RevPatch_MirrorControllerClickPiece.StopCoroutineSafe(this, coroutine);
+		}
+
+        public void Rotate(float angle, GameObject[] GOs)
         {
-            var enumerator = new RotatePieceEnumerator(angle, 0);
-            enumerator.instance = this;
-            return enumerator;
+            foreach (var obj in GOs)
+            {
+				var enumerator = new RotatePieceEnumerator(angle, 0)
+				{
+					instance = this,
+					go = obj
+				};
+				StartCoroutine(enumerator);
+            }
         }
 
         public CustomController()
@@ -1362,6 +1941,7 @@ namespace CustomPieces
             public float z;
             public float angle;
             public CustomController instance;
+			public GameObject go;
 
             public RotatePieceEnumerator(float angle, int state)
             {
@@ -1376,7 +1956,7 @@ namespace CustomPieces
 
             public bool MoveNext()
             {
-                return RevPatch_MirrorControllerAnimateToPosition0.AnimateToPosition0(this, angle);
+                return RevPatch_MirrorControllerAnimateToPosition0.AnimateToPosition0(this);
             }
 
             public void Reset()
@@ -1385,34 +1965,37 @@ namespace CustomPieces
             }
         }
 
-        public abstract Tuple<int, object> Global_MakeTile(string[] args);
+        public abstract Tuple<int, dynamic> Global_MakeTile(string[] args);
         public abstract string Global_GetTileName();
+
+        public void SetupObjects()
+        {
+            rotateObject = Instantiate(Plugin.RotateQuad, transform);
+            moveObject = Instantiate(Plugin.MoveQuad, transform);
+        }
+
+		public override int ClickPiece()
+		{
+			return -1;
+		}
+    }
+
+    [AttributeUsage(AttributeTargets.Class)]
+    public class CustomPieceAttribute : Attribute
+    {
+
     }
 
     namespace BuiltInPieces
     {
         public class TextController : CustomController
         {
-            string Text;
+            public record Data(string Text, string Font, int Size);
+            string text;
+			string font;
+			int size;
 
-            public static GameObject go = new();
-
-            static TextController()
-            {
-                go.AddComponent<MeshRenderer>().material = Resources.Load<Material>("fontMaterial");
-                var text = go.AddComponent<TextMesh>();
-                text.font = Font.GetDefault();
-                text.anchor = TextAnchor.MiddleCenter;
-                text.alignment = TextAlignment.Center;
-                text.characterSize = 1;
-                text.lineSpacing = 1;
-                go.AddComponent<TextController>();
-            }
-
-            public override int ClickPiece()
-            {
-                return -1;
-            }
+            public GameObject go;
 
             public override void EnablePiece(bool enable)
             {
@@ -1441,36 +2024,67 @@ namespace CustomPieces
 
             public override void SetupPiece(int tileX, int tileY, bool drag, bool click, int tileValue, PieceTypes pieceType)
             {
+                Plugin.logger.LogInfo("Text setup piece called");
+                SetupObjects();
+                go = new();
+                if (!go.TryGetComponent<MeshRenderer>(out _))
+                    go.AddComponent<MeshRenderer>();
+                var mr = go.GetComponent<MeshRenderer>();
+                mr.enabled = true;
+                var text = go.AddComponent<TextMesh>() ?? go.GetComponent<TextMesh>();
+                text.font = Font.GetDefault();
+                text.anchor = TextAnchor.MiddleCenter;
+                text.alignment = TextAlignment.Center;
+                text.fontSize = 12;
+                text.color = Color.white;
+                text.characterSize = 1;
+                text.lineSpacing = 1;
+                rotateTime = 0.5f;
+                //mr.material = text.font.material;
+
                 TileX = tileX;
                 TileY = tileY;
                 Drag = false;
                 Click = false;
                 TileValue = tileValue;
                 PieceType = pieceType;
+                {
+                    var temp = transform.position;
+                    temp.z = -1;
+                    transform.position = temp;
+                }
                 BaseLocation = transform.position;
                 VisibleLocation = BaseLocation;
-                controllerGO = Instantiate(go);
-                Text = (string)Plugin.extraData[typeof(TextController)][new(TileX, TileY)];
-                AddPieceToFade(controllerGO.GetComponent<MeshRenderer>());
-                DeactivateInstant();
-                controllerGO.SetActive(true);
+                this.text = ((Data)Plugin.extraData[typeof(TextController)][new(TileX, TileY)]).Text;
+				font = ((Data)Plugin.extraData[typeof(TextController)][new(TileX, TileY)]).Font;
+				size = ((Data)Plugin.extraData[typeof(TextController)][new(TileX, TileY)]).Size;
+				DeactivateInstant();
+                go.SetActive(true);
+                moveObject.SetActive(false);
+                rotateObject.SetActive(false);
             }
 
             protected override void Update()
             {
                 ((MoveController)RevPatch_WallControllerUpdate.Update)(this);
-                if (controllerGO is not null)
-                    controllerGO.GetComponent<TextMesh>().text = Text;
+                if (go is not null)
+                {
+					var textMesh = go.GetComponent<TextMesh>();
+                    textMesh.text = text;
+					textMesh.fontSize = size;
+					textMesh.font = new Font(font);
+                    go.transform.position = transform.position;
+                }
             }
 
             public void SetText(string text)
             {
-                Text = text;
+                this.text = text;
             }
 
             public override Tuple<int, object> Global_MakeTile(string[] args)
             {
-                return new(-2, args[0]);
+                return new(-2, new Data(args[0], args[1], int.Parse(args[2])));
             }
 
             public override string Global_GetTileName()
