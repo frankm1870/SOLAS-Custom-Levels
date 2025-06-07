@@ -3,8 +3,8 @@ The general format of a line is `roomx, roomy, x, y = tilename params` or `roomx
 Valid tilenames and parameters:
 * `mirror <dir:direction> <moveable:bool> <rotateable:bool> <isBeatMirror:bool>`, dir is up for positive mirrors (like /) and anything else for negative mirrors (like \\); isBeatMirror determines if the mirror rotates on pulse hit.
 * `prism <dir:direction> <moveable:bool> <rotateable:bool>`, dir is up for diagonal prisms and anything else for horizontal prisms.
-* `emitter <dir:direction> <color:color|"void"> <moveable:bool>`, color can be any color in the game, or void for an X sigil.
-* `receiver <dir:direction> <color:color|"any">`, color can be any color in the game, or any for a wildcard receiver.
+* `emitter <dir:direction> <color:color|"void"> <moveable:bool> <spacing:int>`, color can be any color in the game, or void for an X sigil.
+* `receiver <dir:direction> <color:color|"any"> <spacing:int>`, color can be any color in the game, or any for a wildcard receiver.
 * `noplace`, a tile that blocks other tiles from being moved onto it.
 * `outofbounds`, similar to a wall, but has no border.
 * `wall`
@@ -12,7 +12,7 @@ Valid tilenames and parameters:
 * `glitch`
 * `fakewall`, a tile that appears to be a wall but acts as a `noplace` tile.
 * `glitchdestroyer`, a tile that is able to destroy up to 3 nearby glitches when pulses hit it.
-* `filter <color:color>`, color can be any color in the game, except void.
+* `filter <color:color>`, color can be any color in the game.
 * `button <type:int>`, type determines what "channel" the button is on. The button will only toggle doors on the same channel as itself.
 * `door <type:int> <state:"open"|"closed">`, state determines whether the door is open or closed, and type determines the channel of the door.
 * `corner`, acts like a wall, but visually changes to connect to nearby walls or corner tiles.
