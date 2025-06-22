@@ -39,6 +39,9 @@
     <Reference Include="Assembly-CSharp">
       <HintPath>..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\SOLAS 128\SOLAS 128_Data\Managed\libs\Assembly-CSharp.dll</HintPath>
     </Reference>
+    <Reference Include="Vectrosity">
+      <HintPath>bin\Debug\net472\Vectrosity.dll</HintPath>
+    </Reference>
   </ItemGroup>
   
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
