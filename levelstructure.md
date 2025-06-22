@@ -19,6 +19,7 @@ Valid tilenames and parameters:
 * `blocker`, acts as a moveable wall.
 * `teleporter <channel:int> <moveable:bool>`, teleports pulses to another teleporter with the same channel. There should only be two teleporters on each channel.
 * `powernode <id:int>`, one of the large ringed tiles that destroys all glitches in its room. The parameter determines what the number of the powernode is. Upon being triggered all doors of the same id will be opened.
+* `nodedoor <id:int>`, a door opened by a powernode of the same id.
 * `combolock <id:int> <position:int>`, creates a combination lock tile like the ones at the end of the secret area from the green branch. The id parameter should refer to a combolock group defined earlier in the file (more information below), and the position parameter is what "digit" in the code this tile is.
 * `empty`
 * `text <text:string> <font:string> <size:int>`, creates a piece of text with the specified text, font, and font size.
