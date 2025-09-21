@@ -10,34 +10,20 @@ using System.Reflection;
 using System.Reflection.Emit;
 using IL = System.Reflection.Emit;
 using UnityEngine;
-using UnityEngine.UIElements;
-using System.Runtime.CompilerServices;
-using UnityEditor;
 using SOLASCustomLevels;
 using System.Linq;
 using MonoMod.Utils;
 using System.Text;
-using MonoMod.Cil;
 using static System.Reflection.Emit.OpCodes;
-using UnityEngine.Experimental.PlayerLoop;
-using Mono.Cecil.Cil;
 using System.Text.RegularExpressions;
-using System.CodeDom;
 using static GlobalVariables;
-using System.Dynamic;
-using Microsoft.CSharp;
 using System.ComponentModel;
-using ICSharpCode.Decompiler;
-using ICSharpCode.Decompiler.CSharp;
-using System.CodeDom.Compiler;
-using Mono.Reflection;
 using UnityEngine.SceneManagement;
 using Vectrosity;
 using System.Runtime.InteropServices;
-using System.Diagnostics;
 using System.Collections.Specialized;
-using UnityEngine.Tilemaps;
-
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Threading;
 
 #if CUSTOMPIECES
 using CustomPieces;
@@ -46,18 +32,6 @@ using CustomPieces.BuiltInPieces;
 
 namespace SOLASCustomLevels
 {
-	public enum Tiles
-	{
-		Empty = 0,
-		NoPlace = 1,
-		OutOfBounds = 2,
-		Wall = 3,
-		Blocker = 5,
-		PowerNode = 7,
-		FakeWall = 9,
-		MiniCannon = 10
-	}
-
 	public delegate void MoveController(InteractableController controller);
 	public delegate void FadeController(InteractableController controller, bool fade);
 
@@ -65,6 +39,20 @@ namespace SOLASCustomLevels
 	{
 		public string keyCodes;
 		public GameController gc;
+	}
+
+	[Serializable]
+	public record struct ExtendedSaveData
+	{
+		public Dictionary<Type, Dictionary<Location, object>> tileData;
+		public bool[,] moveableTiles;
+		public int?[,] teleporters;
+		public Dictionary<int, string> codes;
+		public Dictionary<int, Location> doorIDs;
+		public Dictionary<int, Location> nodeIDs;
+		public Dictionary<Location, GlitchController> destroyedGlitches;
+		public int[,] zones;
+		public Tuple<string, List<Location>, int, int>[,] comboLocks;
 	}
 
 	[BepInPlugin(MyPluginInfo.PLUGIN_GUID, MyPluginInfo.PLUGIN_NAME, MyPluginInfo.PLUGIN_VERSION)]
@@ -98,11 +86,12 @@ namespace SOLASCustomLevels
 		public static event EventHandler<GameController> OnGameStart;
 		public static event EventHandler<OnKeyPressEventArgs> OnKeyPress;
 		static bool inMapScreen = false;
-		internal static string gameSource = "";
 		internal static GameObject editorButton;
 		public static LoadController loadController;
 		public static bool inEditor;
 		public static bool editorLoaded;
+
+		public static ExtendedSaveData?[] extraSaveData = [null, null, null];
 
 		static int[,] backupMenuMap;
 
@@ -118,18 +107,9 @@ namespace SOLASCustomLevels
 
 			Levels.MenuMap[8, 12] = -2;
 
-			editorButton = new GameObject("Editor Button");
-			editorButton.tag = "FadeIn";
-
-			var mr = editorButton.AddComponent<MeshRenderer>();
-			var filter = editorButton.AddComponent<MeshFilter>();
-
-			filter.mesh = MakeBox(new(-0.5f, -0.5f), new(-0.5f, 0.5f), new(0.5f, 0.5f), new(0.5f, -0.5f), 0.03f);
-
 			FileLog.Reset();
 			logger = Logger;
 			Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
-			logger.LogInfo(Path.Combine(Paths.GameRootPath, "Assets\\editor scene"));
 			var bundle = AssetBundle.LoadFromFile(Path.Combine(Paths.GameRootPath, "Assets\\editor scene"));
 
 			configDoChanges = Config.Bind("LevelLoading", "doChanges", true, "Whether to modify level data upon loading a file.");
@@ -185,7 +165,7 @@ namespace SOLASCustomLevels
 				}
 				var asm = Assembly.LoadFrom(file.FullName);
 				var types = asm.GetTypes();
-				var customPieceTypes = types.Where((Type type) => type.BaseType == typeof(CustomController) && type.GetCustomAttribute<CustomPieceAttribute>() is not null);
+				var customPieceTypes = types.Where(type => type.BaseType == typeof(CustomController) && type.GetCustomAttribute<CustomPieceAttribute>() is not null);
 				if (!customPieceTypes.Any())
 					continue;
 				foreach (var type in customPieceTypes)
@@ -308,13 +288,14 @@ namespace SOLASCustomLevels
 				}
 				return;
 			}
+			editorLoaded = false;
 			if (gc == null)
 				return;
 			var controller = AccessTools.Field(typeof(GameController), "selectedInteractable").GetValue(gc) as InteractableController;
 			var clickState = AccessTools.Field(typeof(GameController), "currentClickState").GetValue(gc) as int?;
 			switch (controller)
 			{
-				
+
 			}
 		}
 
@@ -333,6 +314,19 @@ namespace SOLASCustomLevels
 				}
 			}
 			logger.LogInfo("Camera is at " + Camera.allCameras[0].transform.position);
+			if (!(bool)AccessTools.Field(typeof(GameController), "showFullIntro").GetValue(gc))
+			{
+				var data = extraSaveData[STATE_NUMBER].Value;
+				teleporters = data.teleporters;
+				modifiedZones = data.zones;
+				destroyedGlitches = data.destroyedGlitches;
+				moveableTiles = data.moveableTiles;
+				extraData = data.tileData;
+				codeStorages = data.codes;
+				nodeIDs = data.nodeIDs;
+				doorIDs = data.doorIDs;
+				comboLocks = data.comboLocks;
+			}
 			OnGameStart?.Invoke(this, gc);
 		}
 
@@ -679,7 +673,7 @@ namespace SOLASCustomLevels
 						var type = line.Remove(0, 1).Split(' ')[0];
 						var args = new List<string>(line.Remove(0, 1).Split(' ').Skip(1));
 
-						switch(type)
+						switch (type)
 						{
 							case "combolock":
 								comboLocks[int.Parse(args[0].Trim())] = new Tuple<string, List<Location>>(args[1].Trim(), new List<Location>(args.Skip(2).ToDictionary(str =>
@@ -711,7 +705,7 @@ namespace SOLASCustomLevels
 			{
 				using StreamReader reader = new(srcFile.OpenRead());
 				logger.LogInfo("Found file");
-				foreach (string line in  reader.ReadToEnd().Split('\n'))
+				foreach (string line in reader.ReadToEnd().Split('\n'))
 				{
 					if (line.Trim() != "" && line[0] != '#')
 					{
@@ -830,10 +824,9 @@ namespace SOLASCustomLevels
 		public Material redMaterial = colourMaterials[1];
 		public Material greenMaterial = colourMaterials[2];
 		public Material blueMaterial = colourMaterials[4];
-		public Material moveMaterial;
-		public Material rotateMaterial;
 		public bool inSelectionUI;
 		public bool inEditUI;
+		public bool inConfirmUnsavedUI;
 		public static readonly Dictionary<string, string> basePieces = new()
 		{
 			["mirror"] = "Mirror",
@@ -854,12 +847,14 @@ namespace SOLASCustomLevels
 			["teleporter"] = "Teleporter",
 			["powernode"] = "Powernode",
 			["nodedoor"] = "Node door",
-			["combolock"] = "Combo lock"
+			["combolock"] = "Combo lock",
+			["id"] = "Piece by ID"
 		};
 		public Tuple<GameObject, OrderedDictionary> selected;
 		public string currentlyPlacing = "";
 		public GameObject selectRoot;
 		public GameObject editRoot;
+		public bool saved = true;
 
 		#region UIState
 		Vector2 selectionScrollVector = Vector2.zero;
@@ -912,10 +907,6 @@ namespace SOLASCustomLevels
 			grid.Draw3D();
 			gridTransform.transform.position = new(0, 0, 15);
 
-			var bundle = AssetBundle.LoadFromFile(Path.Combine(Paths.GameRootPath, "Assets/materials"));
-			moveMaterial = (Material)bundle.LoadAsset("Moveable");
-			rotateMaterial = (Material)bundle.LoadAsset("Rotateable");
-
 			mouse = new();
 			var mouseMR = mouse.AddComponent<MeshRenderer>();
 			mouseMR.material = glyphMaterial;
@@ -959,7 +950,7 @@ namespace SOLASCustomLevels
 						continue;
 					}
 					GUILayout.Label((string)pair.Key);
-					switch(pair.Value)
+					switch (pair.Value)
 					{
 						case string:
 							extra[i] = GUILayout.TextField((string)(extra.GetValueSafe(i) ?? pair.Value));
@@ -1001,7 +992,19 @@ namespace SOLASCustomLevels
 					}
 					UpdateMesh(selected.Item1, selected.Item2);
 					inEditUI = false;
+					saved = false;
 					return;
+				}
+			}
+			else if (inConfirmUnsavedUI)
+			{
+				GUI.Box(new((Screen.width - 400) / 2, (Screen.height - 200) / 2, 400, 200), "Unsaved Changes");
+				GUI.Label(new((Screen.width - 400) / 2 + 50, (Screen.height - 200) / 2 + 50, 300, 100), "You have unsaved changes, do you still want to exit?");
+				if (GUI.Button(new((Screen.width - 400) / 2 + 50, (Screen.height - 200) / 2 + 160, 300, 30), "Exit"))
+				{
+					inConfirmUnsavedUI = false;
+					SceneManager.LoadScene(0);
+					Plugin.inEditor = false;
 				}
 			}
 		}
@@ -1009,7 +1012,7 @@ namespace SOLASCustomLevels
 		public void Update()
 		{
 			mouse.transform.position = Camera.main.ScreenToWorldPoint(Input.mousePosition) + new Vector3(0, 0, 10);
-			if (inEditUI || inSelectionUI)
+			if (inEditUI || inSelectionUI || inConfirmUnsavedUI)
 			{
 				if (Input.GetKeyDown(KeyCode.Escape))
 				{
@@ -1018,10 +1021,25 @@ namespace SOLASCustomLevels
 				}
 				return;
 			}
-			
+
+			if (Input.GetKeyDown(KeyCode.Escape))
+			{
+				if (saved)
+				{
+					SceneManager.LoadScene(0);
+					Plugin.inEditor = false;
+				}
+				else
+				{
+					inConfirmUnsavedUI = true;
+				}
+				return;
+			}
+
 			if (Input.GetKeyDown(KeyCode.Tab))
 			{
 				inSelectionUI = true;
+				goto nothingSelected;
 			}
 
 			if (Input.GetKeyDown(KeyCode.UpArrow))
@@ -1115,6 +1133,7 @@ namespace SOLASCustomLevels
 				}
 				placedObjects = LoadFromFile(new(ofn.file));
 				placedObjects.ForEach(tuple => UpdateMesh(tuple.Item1, tuple.Item2));
+				saved = true;
 			}
 		afterCheckingOpenFile:
 			if (Input.GetKeyDown(KeyCode.Alpha2))
@@ -1158,21 +1177,22 @@ namespace SOLASCustomLevels
 					file.Flush();
 					stream.Write(output.ToString());
 				}
+				saved = true;
 			}
 		afterCheckingSaveFile:
 
 			var selected = (from obj in placedObjects
-						   where obj.Item1.transform.position == cursor.transform.position
-						   select obj).SingleOrDefault();
+							where obj.Item1.transform.position == cursor.transform.position
+							select obj).SingleOrDefault();
 			if (selected is null)
 			{
 				if (Input.GetKey(KeyCode.Space) && currentlyPlacing != "")
 				{
-					Plugin.logger.LogInfo($"Placing {currentlyPlacing}");
 					var obj = InitializeFromString(currentlyPlacing);
 					var go = obj.Item1;
 					go.transform.position = cursor.transform.position;
 					placedObjects.Add(obj);
+					saved = false;
 				}
 				goto nothingSelected;
 			}
@@ -1184,28 +1204,7 @@ namespace SOLASCustomLevels
 					if (selected.Item1.name is "prism" or "mirror")
 					{
 						selected.Item2["Direction"] = (string)selected.Item2["Direction"] == "up" ? "right" : "up";
-						if (selected.Item1.name == "prism")
-						{
-							if ((string)selected.Item2["Direction"] == "up")
-							{
-								selected.Item1.transform.rotation *= Quaternion.AngleAxis(-45, new(0, 0, 1));
-							}
-							else if ((string)selected.Item2["Direction"] == "right")
-							{
-								selected.Item1.transform.rotation *= Quaternion.AngleAxis(45, new(0, 0, 1));
-							}
-						}
-						if (selected.Item1.name == "mirror")
-						{
-							if ((string)selected.Item2["Direction"] == "up")
-							{
-								selected.Item1.transform.rotation *= Quaternion.AngleAxis(-90, new(0, 0, 1));
-							}
-							else if ((string)selected.Item2["Direction"] == "right")
-							{
-								selected.Item1.transform.rotation *= Quaternion.AngleAxis(90, new(0, 0, 1));
-							}
-						}
+						UpdateMesh(selected.Item1, selected.Item2);
 					}
 					else
 					{
@@ -1224,14 +1223,16 @@ namespace SOLASCustomLevels
 								selected.Item2["Direction"] = "up";
 								break;
 						}
-						selected.Item1.transform.rotation *= Quaternion.AngleAxis(-90, new(0, 0, 1));
+						UpdateMesh(selected.Item1, selected.Item2);
 					}
+					saved = false;
 				}
 			}
 			if (Input.GetKeyDown(KeyCode.Delete))
 			{
 				placedObjects.Remove(selected);
 				Destroy(selected.Item1);
+				saved = false;
 			}
 			if (Input.GetKeyDown(KeyCode.Alpha3))
 			{
@@ -1558,6 +1559,9 @@ namespace SOLASCustomLevels
 					dict["Group ID"] = 0;
 					dict["Code position"] = 0;
 					break;
+				case "id":
+					dict["ID"] = 0;
+					break;
 				default:
 					break;
 			}
@@ -1753,6 +1757,10 @@ namespace SOLASCustomLevels
 				case > 200:
 					name = "teleporter";
 					data["Channel"] = tileID % 100;
+					break;
+				default:
+					name = "id";
+					data["ID"] = tileID;
 					break;
 			}
 			return new(name, data);
@@ -2142,6 +2150,21 @@ namespace SOLASCustomLevels
 						MakeMoveObject(go, new(0, 0));
 					}
 					break;
+				case "button":
+					var topLeft = Plugin.MakePolyline(0.03f, new Vector2(-0.5f, 0.3f), new(-0.5f, 0.4f), new(-0.4f, 0.5f), new(-0.3f, 0.5f));
+					var topRight = Plugin.MakePolyline(0.03f, new Vector2(0.5f, 0.3f), new(0.5f, 0.4f), new(0.4f, 0.5f), new(0.3f, 0.5f));
+					bottomRight = Plugin.MakePolyline(0.03f, new Vector2(0.5f, -0.3f), new(0.5f, -0.4f), new(0.4f, -0.5f), new(0.3f, -0.5f));
+					bottomLeft = Plugin.MakePolyline(0.03f, new Vector2(-0.5f, -0.3f), new(-0.5f, -0.4f), new(-0.4f, -0.5f), new(-0.3f, -0.5f));
+					MakeNumberObject(go, int.Parse(args["Channel"].ToString()));
+					filter.mesh.CombineMeshes([new() { mesh = topLeft }, new() { mesh = topRight }, new() { mesh = bottomLeft }, new() { mesh = bottomRight }], true, false);
+					break;
+				case "nodedoor":
+					filter.mesh = Plugin.MakePolyline(0.03f, new Vector2(-0.5f, 0.3f), new(-0.5f, -0.3f), new(-0.5f, 0), new(0.5f, 0), new(0.5f, -0.3f), new(0.5f, 0.3f));
+					MakeNumberObject(go, int.Parse(args["ID"].ToString()));
+					break;
+				case "id":
+					MakeTextObject(go, $"ID: {args["ID"]}");
+					break;
 				default:
 					MakeTextObject(go, go.name);
 					break;
@@ -2269,7 +2292,7 @@ namespace SOLASCustomLevels
 	}*/
 
 	[HarmonyPatch(typeof(PowerNodeController), "TurnOnIfNecessary")]
-	public class Patch_TurnOnIfNecessary
+	public class Patch_PowerNodeControllerTurnOnIfNecessary
 	{
 		public static Exception Finalizer(Exception __exception)
 		{
@@ -2286,8 +2309,43 @@ namespace SOLASCustomLevels
 		}
 	}
 
+	[HarmonyPatch(typeof(GlobalVariables), nameof(GetFilterAt))]
+	public class Patch_GlobalVariablesGetFilterAt
+	{
+		public static bool Prefix(int x, int y, ref Filter __result)
+		{
+			if (x >= 253 || y >= 253)
+			{
+				__result = null;
+				return false;
+			}
+			return true;
+		}
+
+		//public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instrs)
+		//{
+		//	var matcher = new CodeMatcher(instrs);
+		//	matcher.MatchForward(false, new CodeMatch(Bgt));
+		//	matcher.SetOpcodeAndAdvance(Bge_S);
+		//	matcher.MatchForward(false, new CodeMatch(Cgt));
+		//	matcher.SetOpcodeAndAdvance(Clt);
+		//	matcher.Insert(new CodeInstruction(Not));
+		//	foreach (var instr in matcher.InstructionEnumeration())
+		//	{
+		//		FileLog.Log(instr.ToString());
+		//	}
+		//	return matcher.InstructionEnumeration();
+		//}
+
+		//public static void Postfix(Filter __result, int x, int y)
+		//{
+		//	Plugin.logger.LogInfo(currentFilterState.Length);
+		//	Plugin.logger.LogInfo(__result is null);
+		//}
+	}
+
 	[HarmonyPatch(typeof(GameController), "checkForPulseToPieceCollision")]
-	public class Patch_checkForPulseToPieceCollision
+	public class Patch_GameControllercheckForPulseToPieceCollision
 	{
 		public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
 		{
@@ -2298,13 +2356,13 @@ namespace SOLASCustomLevels
 			matcher.Insert(
 				new CodeInstruction(Ldarg_1),
 				new CodeInstruction(Ldarg_2),
-				new CodeInstruction(Call, AccessTools.Method(typeof(Patch_checkForPulseToPieceCollision), "Temp")));
+				new CodeInstruction(Call, AccessTools.Method(typeof(Patch_GameControllercheckForPulseToPieceCollision), "Temp")));
 			matcher.End();
 			matcher.Advance(-3);
 			matcher.Insert(
 				new CodeInstruction(Ldarg_1),
 				new CodeInstruction(Ldarg_2),
-				new CodeInstruction(Call, AccessTools.Method(typeof(Patch_checkForPulseToPieceCollision), "Temp2")));
+				new CodeInstruction(Call, AccessTools.Method(typeof(Patch_GameControllercheckForPulseToPieceCollision), "Temp2")));
 			return matcher.InstructionEnumeration();
 		}
 
@@ -2326,12 +2384,12 @@ namespace SOLASCustomLevels
 	}
 
 	[HarmonyPatch(typeof(GameController), "BuildLevel")]
-	public class Patch_BuildLevel
+	public class Patch_GameControllerBuildLevel
 	{
 		public static void Prefix(ref int[] level, GameController __instance)
 		{
 			Plugin.instance.GameStart();
-			bool isFirstLoad = (bool)typeof(GameController).GetField("showFullIntro", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(__instance);
+			bool isFirstLoad = (bool)AccessTools.Field(typeof(GameController), "showFullIntro").GetValue(__instance);
 			if (isFirstLoad)
 			{
 				level = Plugin.ModifyLevelData(level, new FileInfo(Plugin.configFilePath.Value));
@@ -2529,6 +2587,9 @@ namespace SOLASCustomLevels
 	{
 		public static void Prefix(GameController __instance, int tileX, int tileY, Location ___mouseStartLoc, InteractableController ___selectedInteractable)
 		{
+			Plugin.moveableTiles[___mouseStartLoc.x, ___mouseStartLoc.y] ^= Plugin.moveableTiles[tileX, tileY];
+			Plugin.moveableTiles[tileX, tileY] ^= Plugin.moveableTiles[___mouseStartLoc.x, ___mouseStartLoc.y];
+			Plugin.moveableTiles[___mouseStartLoc.x, ___mouseStartLoc.y] ^= Plugin.moveableTiles[tileX, tileY];
 			if (___selectedInteractable is EmitterController ec)
 			{
 				var emitter = (EmitterReceiver)typeof(EmitterController).GetPrivateField("Emitter", ec);
@@ -2573,7 +2634,7 @@ namespace SOLASCustomLevels
 		public static bool Prefix(int x, int y, int pieceType, ref Location __result)
 		{
 			bool isCustom = false;
-			int? id;
+			int id;
 			if (Plugin.teleporters[x, y] is not null)
 			{
 				isCustom = true;
@@ -2581,7 +2642,7 @@ namespace SOLASCustomLevels
 			}
 			else
 			{
-				id = pieceType;
+				id = (pieceType - 201) * 2;
 			}
 			List<int?> level;
 			if (isCustom)
@@ -2597,7 +2658,7 @@ namespace SOLASCustomLevels
 			}
 			else
 			{
-				level = new List<int?>(currentLevelState.Cast<int?>());
+				level = [.. currentLevelState.Cast<int?>()];
 			}
 			var firstIndex = level.IndexOf(id);
 			var lastIndex = level.LastIndexOf(id);
@@ -2609,6 +2670,7 @@ namespace SOLASCustomLevels
 			{
 				__result = new Location(firstIndex % 253, firstIndex / 253);
 			}
+			Plugin.logger.LogInfo($"{__result.x}, {__result.y}");
 			return false;
 		}
 	}
@@ -2850,6 +2912,16 @@ namespace SOLASCustomLevels
 	{
 		public static void Prefix()
 		{
+			Plugin.editorButton = new("Editor Button")
+			{
+				tag = "FadeIn"
+			};
+
+			Plugin.editorButton.AddComponent<MeshRenderer>();
+
+			var filter = Plugin.editorButton.AddComponent<MeshFilter>();
+
+			filter.mesh = Plugin.MakeBox(new(-0.5f, -0.5f), new(-0.5f, 0.5f), new(0.5f, 0.5f), new(0.5f, -0.5f), 0.03f);
 			for (int i = 0; i < Levels.MenuMap.GetLength(0); i++)
 			{
 				for (int j = 0; j < Levels.MenuMap.GetLength(1); j++)
@@ -2910,15 +2982,6 @@ namespace SOLASCustomLevels
 						break;
 				}
 			}
-		}
-	}
-
-	[HarmonyPatch(typeof(LoadController), "Update")]
-	public class Patch_LoadControllerUpdate
-	{
-		public static void Prefix()
-		{
-			UnityEngine.Cursor.visible = true;
 		}
 	}
 
@@ -3290,6 +3353,76 @@ namespace SOLASCustomLevels
 			Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] = (Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] as int?) + 1;
 			Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] = (Plugin.extraData[typeof(EmitterReceiver)][new(emitter.X, emitter.Y)] as int?) % ((Plugin.extraData[typeof(EmitterController)].TryGetValue(new(emitter.X, emitter.Y), out var temp2) ? temp2 : Plugin.DEFAULT_FREQUENCY) as int?);
 			return result;
+		}
+	}
+
+	[HarmonyPatch(typeof(GlobalVariables), "SaveStandAlone")]
+	public class Patch_GlobalVariablesSaveStandAlone
+	{
+		public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+		{
+			var matcher = new CodeMatcher(instructions);
+			matcher.MatchForward(false, new CodeMatch(Call, AccessTools.Method(typeof(BinaryFormatter), nameof(BinaryFormatter.Serialize), [typeof(Stream), typeof(object)])));
+			matcher.Insert(new CodeInstruction(Call, AccessTools.Method(typeof(Patch_GlobalVariablesSaveStandAlone), "Temp")));
+			matcher.Start();
+			matcher.MatchForward(false, new CodeMatch(null, AccessTools.Field(typeof(GlobalVariables), "FILE_NAME")));
+			matcher.Repeat(matcher =>
+			{
+				matcher.SetInstruction(new(Ldstr, "/DorchModded.sav"));
+			});
+			return matcher.InstructionEnumeration();
+		}
+
+		public static Tuple<LevelStateHolder[], ExtendedSaveData?[]> Temp(LevelStateHolder[] state)
+		{
+			return new(state, Plugin.extraSaveData);
+		}
+	}
+
+	[HarmonyPatch(typeof(GlobalVariables), "LoadStandAlone")]
+	public class Patch_GlobalVariablesLoadStandAlone
+	{
+		public static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+		{
+			var matcher = new CodeMatcher(instructions);
+			matcher.MatchForward(false, new CodeMatch(null, AccessTools.Field(typeof(GlobalVariables), "FILE_NAME")));
+			matcher.Repeat(matcher =>
+			{
+				matcher.SetInstruction(new(Ldstr, "/DorchModded.sav"));
+			});
+			matcher.Start();
+			matcher.MatchForward(false, new CodeMatch(Castclass));
+			matcher.SetOperandAndAdvance(typeof(Tuple<LevelStateHolder[], ExtendedSaveData?[]>));
+			matcher.InsertAndAdvance(new CodeInstruction(Dup), new(Call, AccessTools.PropertyGetter(typeof(Tuple<LevelStateHolder[], ExtendedSaveData?[]>), "Item1")));
+			matcher.Advance(1);
+			matcher.Insert(new CodeInstruction(Call, AccessTools.PropertyGetter(typeof(Tuple<LevelStateHolder[], ExtendedSaveData?[]>), "Item2")),
+				new(Call, AccessTools.Method(typeof(Patch_GlobalVariablesLoadStandAlone), "Temp")));
+			return matcher.InstructionEnumeration();
+		}
+
+		public static void Temp(ExtendedSaveData?[] data)
+		{
+			Plugin.extraSaveData = data;
+		}
+	}
+
+	[HarmonyPatch(typeof(GameController), "SaveCurrentState")]
+	public class Patch_GameControllerSaveCurrentState
+	{
+		public static void Prefix()
+		{
+			Plugin.extraSaveData[STATE_NUMBER] = new()
+			{
+				destroyedGlitches = Plugin.destroyedGlitches,
+				nodeIDs = Plugin.nodeIDs,
+				doorIDs = Plugin.doorIDs,
+				teleporters = Plugin.teleporters,
+				moveableTiles = Plugin.moveableTiles,
+				zones = Plugin.modifiedZones,
+				codes = Plugin.codeStorages,
+				tileData = Plugin.extraData,
+				comboLocks = Plugin.comboLocks
+			};
 		}
 	}
 
