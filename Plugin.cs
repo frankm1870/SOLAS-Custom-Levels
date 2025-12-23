@@ -23,7 +23,6 @@ using Vectrosity;
 using System.Runtime.InteropServices;
 using System.Collections.Specialized;
 using System.Runtime.Serialization.Formatters.Binary;
-using System.Threading;
 
 #if CUSTOMPIECES
 using CustomPieces;
@@ -60,6 +59,8 @@ namespace SOLASCustomLevels
 	public class Plugin : BaseUnityPlugin
 	{
 		public const int DEFAULT_FREQUENCY = 4;
+		public static readonly string ASSETS_PATH = Path.Combine(Paths.GameRootPath, "Assets");
+
 		internal static ConfigEntry<bool> configDoChanges;
 		internal static ConfigEntry<string> configFilePath;
 		public static ManualLogSource logger;
@@ -110,7 +111,7 @@ namespace SOLASCustomLevels
 			FileLog.Reset();
 			logger = Logger;
 			Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
-			var bundle = AssetBundle.LoadFromFile(Path.Combine(Paths.GameRootPath, "Assets\\editor scene"));
+			AssetBundle.LoadFromFile(Path.Combine(ASSETS_PATH, "editor scene"));
 
 			configDoChanges = Config.Bind("LevelLoading", "doChanges", true, "Whether to modify level data upon loading a file.");
 			configFilePath = Config.Bind("LevelLoading", "filePath", Paths.GameRootPath + @"\level_mods.lvl", "The level to load.");
@@ -372,7 +373,6 @@ namespace SOLASCustomLevels
 			try
 			{
 				using StreamReader reader = new(srcFile.OpenRead());
-				logger.LogInfo("Found file");
 				Dictionary<int, Tuple<string, List<Location>>> comboLocks = new();
 				foreach (string line in reader.ReadToEnd().Split('\n'))
 				{
@@ -381,7 +381,6 @@ namespace SOLASCustomLevels
 						var nodeID = -1;
 						var theseShouldBeMoveable = false;
 						var theseShouldHaveID = 0;
-						logger.LogInfo("Reading line '" + line + "'");
 						var coords = line.Split('=')[0].Trim().Split(',');
 						var replaceWith = line.Split('=')[1].Trim().ToLower();
 						int tileID;
@@ -639,19 +638,35 @@ namespace SOLASCustomLevels
 								Plugin.extraData.TryAddValue(controllerType, []);
 								Plugin.extraData[controllerType][new Location(int.Parse(coords[0].Trim()) * 14 + int.Parse(coordsX[0].Trim()), int.Parse(coords[1].Trim()) * 14 + int.Parse(coordsY[0].Trim()))] = extraData;
 							}
-							logger.LogInfo("Replacing range '" + coordsX[0] + ", " + ((coordsX.Length == 2) ? int.Parse(coordsX[1].Trim()) : int.Parse(coordsX[0].Trim())) + "', '" + coordsY[0] + ", " + ((coordsY.Length == 2) ? int.Parse(coordsY[1].Trim()) : int.Parse(coordsY[0].Trim())) + "'");
-							for (int i = int.Parse(coordsX[0].Trim()); i <= ((coordsX.Length == 2) ? int.Parse(coordsX[1].Trim()) : int.Parse(coordsX[0].Trim())); i++)
+							if (combolockID.HasValue)
 							{
-								for (int j = int.Parse(coordsY[0].Trim()); j <= ((coordsY.Length == 2) ? int.Parse(coordsY[1].Trim()) : int.Parse(coordsY[0].Trim())); j++)
+								Tuple<string, List<Location>, int, int> comboLock = new(comboLocks[combolockID.Value].Item1, comboLocks[combolockID.Value].Item2, combolockPos, combolockID.Value);
+								string startingCode = new('-', comboLocks[combolockID.Value].Item1.Length);
+								codeStorages[combolockID.Value] = startingCode;
+								for (int i = int.Parse(coordsX[0].Trim()); i <= ((coordsX.Length == 2) ? int.Parse(coordsX[1].Trim()) : int.Parse(coordsX[0].Trim())); i++)
 								{
-									logger.LogInfo("Replacing tile " + i.ToString() + ", " + j.ToString());
-									indices.Add(int.Parse(coords[0].Trim()) * 14 + i + (int.Parse(coords[1].Trim()) * 14 + j) * 253);
-									moveableTiles[int.Parse(coords[0].Trim()) * 14 + i, int.Parse(coords[1].Trim()) * 14 + j] = theseShouldBeMoveable;
-									teleporters[int.Parse(coords[0].Trim()) * 14 + i, int.Parse(coords[1].Trim()) * 14 + j] = theseShouldHaveID;
-									if (combolockID.HasValue)
+									for (int j = int.Parse(coordsY[0].Trim()); j <= ((coordsY.Length == 2) ? int.Parse(coordsY[1].Trim()) : int.Parse(coordsY[0].Trim())); j++)
 									{
-										Plugin.comboLocks[int.Parse(coords[0].Trim()) * 14 + i, int.Parse(coords[1].Trim()) * 14 + j] = new(comboLocks[combolockID.Value].Item1, comboLocks[combolockID.Value].Item2, combolockPos, combolockID.Value);
-										codeStorages[combolockID.Value] = new('-', comboLocks[combolockID.Value].Item1.Length);
+										var x = int.Parse(coords[0].Trim()) * 14 + i;
+										var y = int.Parse(coords[1].Trim()) * 14 + j;
+										indices.Add(x + y * 253);
+										moveableTiles[x, y] = theseShouldBeMoveable;
+										teleporters[x, y] = theseShouldHaveID;
+										Plugin.comboLocks[x, y] = comboLock;
+									}
+								}
+							}
+							else
+							{
+								for (int i = int.Parse(coordsX[0].Trim()); i <= ((coordsX.Length == 2) ? int.Parse(coordsX[1].Trim()) : int.Parse(coordsX[0].Trim())); i++)
+								{
+									for (int j = int.Parse(coordsY[0].Trim()); j <= ((coordsY.Length == 2) ? int.Parse(coordsY[1].Trim()) : int.Parse(coordsY[0].Trim())); j++)
+									{
+										var x = int.Parse(coords[0].Trim()) * 14 + i;
+										var y = int.Parse(coords[1].Trim()) * 14 + j;
+										indices.Add(x + y * 253);
+										moveableTiles[x, y] = theseShouldBeMoveable;
+										teleporters[x, y] = theseShouldHaveID;
 									}
 								}
 							}
@@ -660,7 +675,6 @@ namespace SOLASCustomLevels
 							flattenedLevel = GetFlattenedArray(level);
 							foreach (int index in indices)
 								levelData[index] = tileID != -1 ? tileID : flattenedLevel[index];
-							logger.LogInfo("Successfully modified tile " + coords[2] + ", " + coords[3]);
 						}
 						catch (Exception e)
 						{
@@ -824,6 +838,8 @@ namespace SOLASCustomLevels
 		public Material redMaterial = colourMaterials[1];
 		public Material greenMaterial = colourMaterials[2];
 		public Material blueMaterial = colourMaterials[4];
+		public Material moveableMaterial;
+		public Material rotateableMaterial;
 		public bool inSelectionUI;
 		public bool inEditUI;
 		public bool inConfirmUnsavedUI;
@@ -848,13 +864,24 @@ namespace SOLASCustomLevels
 			["powernode"] = "Powernode",
 			["nodedoor"] = "Node door",
 			["combolock"] = "Combo lock",
-			["id"] = "Piece by ID"
+			["id"] = "Piece by ID",
+#if SELECTION
+			["select"] = "Select"
+#endif
 		};
 		public Tuple<GameObject, OrderedDictionary> selected;
 		public string currentlyPlacing = "";
 		public GameObject selectRoot;
 		public GameObject editRoot;
 		public bool saved = true;
+		public bool keyboardUsed;
+		public Vector3 lastMousePos;
+#if SELECTION
+		public Vector3? selectionStart;
+		public Vector3? selectionEnd;
+		public GameObject selectionBox = new();
+		public List<GameObject> selectedObjects = [];
+#endif
 
 		#region UIState
 		Vector2 selectionScrollVector = Vector2.zero;
@@ -864,6 +891,9 @@ namespace SOLASCustomLevels
 
 		public void Start()
 		{
+			var bundle = AssetBundle.LoadFromFile(Path.Combine(Plugin.ASSETS_PATH, "materials"));
+			moveableMaterial = (Material)bundle.LoadAsset("assets/materials/moveable.mat");
+			rotateableMaterial = (Material)bundle.LoadAsset("assets/materials/rotateable.mat");
 			UnityEngine.Cursor.visible = true;
 			UnityEngine.Cursor.lockState = CursorLockMode.None;
 			UnityEngine.Cursor.SetCursor(null, new(0, 0), CursorMode.Auto);
@@ -876,7 +906,6 @@ namespace SOLASCustomLevels
 			screenLabel.AddComponent<MeshRenderer>();
 			var text = screenLabel.AddComponent<TextMesh>();
 			text.text = "Current screen: 0, 0";
-			text.font = Font.GetDefault();
 			text.color = Color.white;
 			text.fontSize = 30;
 			text.anchor = TextAnchor.MiddleLeft;
@@ -889,7 +918,6 @@ namespace SOLASCustomLevels
 			placingLabel.AddComponent<MeshRenderer>();
 			text = placingLabel.AddComponent<TextMesh>();
 			text.text = "Currently placing: None";
-			text.font = Font.GetDefault();
 			text.color = Color.white;
 			text.fontSize = 30;
 			text.anchor = TextAnchor.MiddleLeft;
@@ -898,20 +926,26 @@ namespace SOLASCustomLevels
 			cursor = new GameObject();
 			var mr = cursor.AddComponent<MeshRenderer>();
 			var filter = cursor.AddComponent<MeshFilter>();
-			filter.mesh = Plugin.MakeBox(new(-0.5f, -0.5f), new(-0.5f, 0.5f), new(0.5f, 0.5f), new(0.5f, -0.5f), 0.01f);
+			filter.mesh = Plugin.MakeBox(new(-0.5f, -0.5f), new(-0.5f, 0.5f), new(0.5f, 0.5f), new(0.5f, -0.5f), 0.02f);
 			cursor.transform.parent = Camera.main.transform;
-			mr.material = colourMaterials[0];
+			mr.material = colourMaterials[(int)COLOUR.NONE];
 			currentScreen = new(0, 0);
 			MakeGrid(this);
 			grid.color = Color.white;
-			grid.Draw3D();
+			grid.drawTransform = gridTransform.transform;
 			gridTransform.transform.position = new(0, 0, 15);
-
+			grid.Draw3D();
+#if SELECTION
+			var selectionMR = selectionBox.AddComponent<MeshRenderer>();
+			selectionBox.AddComponent<MeshFilter>();
+			selectionMR.material = colourMaterials[(int)COLOUR.WHITE];
+#endif
 			mouse = new();
 			var mouseMR = mouse.AddComponent<MeshRenderer>();
 			mouseMR.material = glyphMaterial;
 			var mouseMF = mouse.AddComponent<MeshFilter>();
-			mouseMF.mesh = Plugin.MakeQuad(new(-0.1f, -0.1f), new(-0.1f, 0.1f), new(0.1f, 0.1f), new(0.1f, -0.1f));
+			mouseMF.mesh = new();
+			mouseMF.mesh.CombineMeshes([new() { mesh = Plugin.MakeLine(0, 0.1f, 0, -0.1f, 0.02f) }, new() { mesh = Plugin.MakeLine(-0.1f, 0, 0.1f, 0, 0.02f) }], true, false);
 		}
 
 		public void OnGUI()
@@ -1012,12 +1046,44 @@ namespace SOLASCustomLevels
 		public void Update()
 		{
 			mouse.transform.position = Camera.main.ScreenToWorldPoint(Input.mousePosition) + new Vector3(0, 0, 10);
+			if (Input.mousePosition != lastMousePos || Input.GetMouseButtonDown(0) || Input.GetMouseButtonDown(1))
+			{
+				keyboardUsed = false;
+			}
+			lastMousePos = Input.mousePosition;
+#if SELECTION
+			if ((selectedObjects?.Count ?? 0) == 0 && (Input.GetKeyDown(KeyCode.LeftArrow) ||
+				Input.GetKeyDown(KeyCode.RightArrow) ||
+				Input.GetKeyDown(KeyCode.UpArrow) ||
+				Input.GetKeyDown(KeyCode.DownArrow)))
+#else
+			if (Input.GetKeyDown(KeyCode.LeftArrow) ||
+				Input.GetKeyDown(KeyCode.RightArrow) ||
+				Input.GetKeyDown(KeyCode.UpArrow) ||
+				Input.GetKeyDown(KeyCode.DownArrow))
+#endif
+			{
+				keyboardUsed = true;
+#if SELECTION
+				selectionStart = null;
+				selectionEnd = null;
+#endif
+			}
+			if (keyboardUsed)
+			{
+				mouse.SetActive(false);
+			}
+			else
+			{
+				mouse.SetActive(true);
+			}
 			if (inEditUI || inSelectionUI || inConfirmUnsavedUI)
 			{
 				if (Input.GetKeyDown(KeyCode.Escape))
 				{
 					inEditUI = false;
 					inSelectionUI = false;
+					inConfirmUnsavedUI = false;
 				}
 				return;
 			}
@@ -1042,38 +1108,138 @@ namespace SOLASCustomLevels
 				goto nothingSelected;
 			}
 
-			if (Input.GetKeyDown(KeyCode.UpArrow))
+			if (keyboardUsed)
 			{
-				cursor.transform.localPosition += new Vector3(0, 1, 0);
-				if (cursor.transform.localPosition.y > 7)
+				if (Input.GetKeyDown(KeyCode.UpArrow))
 				{
-					cursor.transform.localPosition = new(cursor.transform.localPosition.x, 7, cursor.transform.localPosition.z);
+					cursor.transform.localPosition += new Vector3(0, 1, 0);
+					if (cursor.transform.localPosition.y > 7)
+					{
+						cursor.transform.localPosition = new(cursor.transform.localPosition.x, 7, cursor.transform.localPosition.z);
+					}
+				}
+				if (Input.GetKeyDown(KeyCode.DownArrow))
+				{
+					cursor.transform.localPosition += new Vector3(0, -1, 0);
+					if (cursor.transform.localPosition.y < -7)
+					{
+						cursor.transform.localPosition = new(cursor.transform.localPosition.x, -7, cursor.transform.localPosition.z);
+					}
+				}
+				if (Input.GetKeyDown(KeyCode.LeftArrow))
+				{
+					cursor.transform.localPosition += new Vector3(-1, 0, 0);
+					if (cursor.transform.localPosition.x < -7)
+					{
+						cursor.transform.localPosition = new(-7, cursor.transform.localPosition.y, cursor.transform.localPosition.z);
+					}
+				}
+				if (Input.GetKeyDown(KeyCode.RightArrow))
+				{
+					cursor.transform.localPosition += new Vector3(1, 0, 0);
+					if (cursor.transform.localPosition.x > 7)
+					{
+						cursor.transform.localPosition = new(7, cursor.transform.localPosition.y, cursor.transform.localPosition.z);
+					}
 				}
 			}
-			if (Input.GetKeyDown(KeyCode.DownArrow))
+			else
 			{
-				cursor.transform.localPosition += new Vector3(0, -1, 0);
-				if (cursor.transform.localPosition.y < -7)
-				{
-					cursor.transform.localPosition = new(cursor.transform.localPosition.x, -7, cursor.transform.localPosition.z);
-				}
-			}
-			if (Input.GetKeyDown(KeyCode.LeftArrow))
-			{
-				cursor.transform.localPosition += new Vector3(-1, 0, 0);
-				if (cursor.transform.localPosition.x < -7)
-				{
-					cursor.transform.localPosition = new(-7, cursor.transform.localPosition.y, cursor.transform.localPosition.z);
-				}
-			}
-			if (Input.GetKeyDown(KeyCode.RightArrow))
-			{
-				cursor.transform.localPosition += new Vector3(1, 0, 0);
+				cursor.transform.localPosition = new(Mathf.Round(Camera.main.ScreenToWorldPoint(Input.mousePosition).x), Mathf.Round(Camera.main.ScreenToWorldPoint(Input.mousePosition).y), cursor.transform.localPosition.z);
 				if (cursor.transform.localPosition.x > 7)
 				{
 					cursor.transform.localPosition = new(7, cursor.transform.localPosition.y, cursor.transform.localPosition.z);
 				}
+				if (cursor.transform.localPosition.x < -7)
+				{
+					cursor.transform.localPosition = new(-7, cursor.transform.localPosition.y, cursor.transform.localPosition.z);
+				}
+				if (cursor.transform.localPosition.y < -7)
+				{
+					cursor.transform.localPosition = new(cursor.transform.localPosition.x, -7, cursor.transform.localPosition.z);
+				}
+				if (cursor.transform.localPosition.y > 7)
+				{
+					cursor.transform.localPosition = new(cursor.transform.localPosition.x, 7, cursor.transform.localPosition.z);
+				}
+#if SELECTION
+				if ((selectedObjects?.Count ?? 0) == 0)
+				{
+					goto afterArrowKeyCheck;
+				}
+
+				if (Input.GetKeyDown(KeyCode.UpArrow))
+				{
+					selectedObjects.Try((obj) =>
+					{
+						obj.transform.position += new Vector3(0, 1, 0);
+						selectionStart += new Vector3(0, 1, 0);
+						selectionEnd += new Vector3(0, 1, 0);
+						return (obj, (undoObj) =>
+						{
+							undoObj.transform.position -= new Vector3(0, 1, 0);
+							selectionStart -= new Vector3(0, 1, 0);
+							selectionEnd -= new Vector3(0, 1, 0);
+							return undoObj;
+						}
+						);
+					}, (obj) => obj.transform.position.y > 7);
+				}
+				if (Input.GetKeyDown(KeyCode.DownArrow))
+				{
+					selectedObjects.Try((obj) =>
+					{
+						obj.transform.position += new Vector3(0, -1, 0);
+						selectionStart += new Vector3(0, -1, 0);
+						selectionEnd += new Vector3(0, -1, 0);
+						return (obj, (undoObj) =>
+						{
+							undoObj.transform.position -= new Vector3(0, -1, 0);
+							selectionStart -= new Vector3(0, -1, 0);
+							selectionEnd -= new Vector3(0, -1, 0);
+							return undoObj;
+						}
+						);
+					}, (obj) => obj.transform.position.y < -7);
+				}
+				if (Input.GetKeyDown(KeyCode.LeftArrow))
+				{
+					selectedObjects.Try((obj) =>
+					{
+						obj.transform.position += new Vector3(-1, 0, 0);
+						selectionStart += new Vector3(-1, 0, 0);
+						selectionEnd += new Vector3(-1, 0, 0);
+						return (obj, (undoObj) =>
+						{
+							undoObj.transform.position -= new Vector3(-1, 0, 0);
+							selectionStart -= new Vector3(-1, 0, 0);
+							selectionEnd -= new Vector3(-1, 0, 0);
+							return undoObj;
+						}
+						);
+					}, (obj) => obj.transform.position.x < -7);
+				}
+				if (Input.GetKeyDown(KeyCode.RightArrow))
+				{
+					selectedObjects.Try((obj) =>
+					{
+						obj.transform.position += new Vector3(1, 0, 0);
+						selectionStart += new Vector3(1, 0, 0);
+						selectionEnd += new Vector3(1, 0, 0);
+						return (obj, (undoObj) =>
+						{
+							undoObj.transform.position -= new Vector3(1, 0, 0);
+							selectionStart -= new Vector3(1, 0, 0);
+							selectionEnd -= new Vector3(1, 0, 0);
+							return undoObj;
+						}
+						);
+					}, (obj) => obj.transform.position.x > 7);
+				}
+#endif
 			}
+
+		afterArrowKeyCheck:
 
 			if (Input.GetKeyDown(KeyCode.W))
 			{
@@ -1108,7 +1274,7 @@ namespace SOLASCustomLevels
 				}
 			}
 
-			if (Input.GetKeyDown(KeyCode.Alpha1))
+			if ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.O))
 			{
 				var ofn = new Unmanaged.OpenFileNameData();
 
@@ -1136,7 +1302,7 @@ namespace SOLASCustomLevels
 				saved = true;
 			}
 		afterCheckingOpenFile:
-			if (Input.GetKeyDown(KeyCode.Alpha2))
+			if ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.S))
 			{
 				var ofn = new Unmanaged.OpenFileNameData();
 
@@ -1186,7 +1352,7 @@ namespace SOLASCustomLevels
 							select obj).SingleOrDefault();
 			if (selected is null)
 			{
-				if (Input.GetKey(KeyCode.Space) && currentlyPlacing != "")
+				if ((Input.GetKey(KeyCode.Space) || Input.GetMouseButton(0)) && !(currentlyPlacing == "" || currentlyPlacing == "select"))
 				{
 					var obj = InitializeFromString(currentlyPlacing);
 					var go = obj.Item1;
@@ -1228,26 +1394,102 @@ namespace SOLASCustomLevels
 					saved = false;
 				}
 			}
-			if (Input.GetKeyDown(KeyCode.Delete))
+			if (Input.GetKey(KeyCode.Delete) || Input.GetMouseButton(1))
 			{
 				placedObjects.Remove(selected);
 				Destroy(selected.Item1);
 				saved = false;
 			}
-			if (Input.GetKeyDown(KeyCode.Alpha3))
+			if (Input.GetKeyDown(KeyCode.E))
 			{
 				this.selected = selected;
 				inEditUI = true;
 			}
 
 		nothingSelected:
+#if SELECTION
+			if (currentlyPlacing != "select")
+			{
+				foreach (var obj in selectedObjects)
+				{
+					if (placedObjects.Any((tuple) => tuple.Item1.transform.position == obj.transform.position))
+					{
 
+					}
+				}
+				selectionStart = null;
+				selectionEnd = null;
+			}
+			if (selectionStart.HasValue && selectionEnd.HasValue)
+			{
+				var bl = Vector2.Min(selectionStart.Value, selectionEnd.Value);
+				var tr = Vector2.Max(selectionStart.Value, selectionEnd.Value);
+				var tl = new Vector2(bl.x, tr.y);
+				var br = new Vector2(tr.x, bl.y);
+				selectionBox.transform.position = (Vector3)tl + new Vector3(0, 0, 10);
+				var selectionFilter = selectionBox.GetComponent<MeshFilter>();
+				selectionFilter.mesh = Plugin.MakeBox(bl - tl + new Vector2(-0.5f, -0.5f), new Vector2(-0.5f, 0.5f), tr - tl + new Vector2(0.5f, 0.5f), br - tl + new Vector2(0.5f, -0.5f), 0.08f);
+				selectionBox.SetActive(true);
+			}
+			else
+			{
+				selectionBox.SetActive(false);
+			}
+
+			if (keyboardUsed)
+			{
+				goto skipSelection;
+			}
+			
+			if (Input.GetMouseButtonDown(0) && currentlyPlacing == "select")
+			{
+				selectionStart = cursor.transform.position;
+			}
+			if (Input.GetMouseButton(0) && currentlyPlacing == "select")
+			{
+				selectionEnd = cursor.transform.position;
+			}
+
+			if (selectionStart.HasValue && Input.GetMouseButtonUp(0))
+			{
+				selectionEnd = cursor.transform.position;
+				selectedObjects = [.. from Tuple<GameObject, OrderedDictionary> objTuple in placedObjects
+								  let obj = objTuple.Item1
+								  where Mathf.Sqrt((obj.transform.position.x - selectionStart.Value.x) * (selectionEnd.Value.x - obj.transform.position.x)) * Mathf.Sqrt((obj.transform.position.y - selectionStart.Value.y) * (selectionEnd.Value.y - obj.transform.position.y)) >= 0
+								  select obj];
+				if (selectedObjects.Count == 0)
+				{
+					selectionStart = null;
+					selectionEnd = null;
+				}
+				else
+				{
+					var bl = Vector2.Min(selectionStart.Value, selectionEnd.Value);
+					var tr = Vector2.Max(selectionStart.Value, selectionEnd.Value);
+					var tl = new Vector2(bl.x, tr.y);
+					var br = new Vector2(tr.x, bl.y);
+					var byX = from obj in selectedObjects
+							  orderby obj.transform.position.x
+							  select obj.transform.position.x;
+					var byY = from obj in selectedObjects
+							  orderby obj.transform.position.y
+							  select obj.transform.position.y;
+					bl.x = tl.x = byX.Min();
+					bl.y = br.y = byY.Min();
+					tl.y = tr.y = byY.Max();
+					br.x = tr.x = byX.Max();
+					selectionStart = tl;
+					selectionEnd = br;
+				}
+			}
+
+		skipSelection:
+#endif
 			Camera.main.transform.position = 14 * new Vector3(currentScreen.x, -currentScreen.y);
 			var text = screenLabel.GetComponent<TextMesh>();
 			text.text = $"Current screen: {currentScreen.x}, {currentScreen.y}";
 			text = placingLabel.GetComponent<TextMesh>();
-			text.text = $"Currently placing: {(currentlyPlacing == "" ? "None" : basePieces[currentlyPlacing])}";
-			grid.drawTransform = gridTransform.transform;
+			text.text = currentlyPlacing == "select" ? "Selecting pieces" : $"Currently placing: {(currentlyPlacing == "" ? "None" : basePieces[currentlyPlacing])}";
 			grid.Draw3D();
 		}
 
@@ -1768,22 +2010,22 @@ namespace SOLASCustomLevels
 
 		public void UpdateMesh(GameObject go, OrderedDictionary args)
 		{
-			void MakeMoveObject(GameObject parent, Vector2 offset)
+			void MakeMoveObject(GameObject parent, Vector3 offset)
 			{
 				var move = new GameObject();
 				var moveMR = move.AddComponent<MeshRenderer>();
-				moveMR.material = blueMaterial;
+				moveMR.material = moveableMaterial;
 				var moveMF = move.AddComponent<MeshFilter>();
 				moveMF.mesh = Plugin.MakeQuad(new(-0.2f, 0), new(0, 0.2f), new(0.2f, 0), new(0, -0.2f));
 				move.transform.parent = parent.transform;
 				move.transform.localPosition = offset;
 			}
 
-			void MakeRotateObject(GameObject parent, Vector2 offset)
+			void MakeRotateObject(GameObject parent, Vector3 offset)
 			{
 				var rotate = new GameObject();
 				var rotateMR = rotate.AddComponent<MeshRenderer>();
-				rotateMR.material = redMaterial;
+				rotateMR.material = rotateableMaterial;
 				var rotateMF = rotate.AddComponent<MeshFilter>();
 				rotateMF.mesh = Plugin.MakeQuad(new(-0.2f, 0), new(0, 0.2f), new(0.2f, 0), new(0, -0.2f));
 				rotate.transform.parent = parent.transform;
@@ -1938,11 +2180,11 @@ namespace SOLASCustomLevels
 
 					if ((bool)args["Moveable"])
 					{
-						MakeMoveObject(go, new(-0.1f, 0));
+						MakeMoveObject(go, new(-0.1f, 0, -1f));
 					}
 					if ((bool)args["Rotateable"])
 					{
-						MakeRotateObject(go, new(0.1f, 0));
+						MakeRotateObject(go, new(0.1f, 0, -1f));
 					}
 					break;
 				case "glitch":
@@ -2028,11 +2270,11 @@ namespace SOLASCustomLevels
 					}
 					if ((bool)args["Moveable"])
 					{
-						MakeMoveObject(go, new(-0.1f, 0));
+						MakeMoveObject(go, new(-0.1f, 0, -1f));
 					}
 					if ((bool)args["Rotateable"])
 					{
-						MakeRotateObject(go, new(0.1f, 0));
+						MakeRotateObject(go, new(0.1f, 0, -1f));
 					}
 
 					actual.transform.parent = go.transform;
@@ -2070,7 +2312,7 @@ namespace SOLASCustomLevels
 
 					if ((bool)args["Moveable"])
 					{
-						MakeMoveObject(go, new(0, 0.25f));
+						MakeMoveObject(go, new(0, 0.25f, -1f));
 					}
 					break;
 				case "receiver":
@@ -3426,17 +3668,6 @@ namespace SOLASCustomLevels
 		}
 	}
 
-#if false
-	[HarmonyPatch(typeof(InteractableController), nameof(InteractableController.ActivateInstant))]
-	public class Patch_InteractableControllerActivateInstant
-	{
-		public static void Prefix(InteractableController __instance)
-		{
-			Plugin.logger.LogInfo(__instance.GetType());
-		}
-	}
-#endif
-
 	public static class Extensions
 	{
 		public static object GetPrivateField(this Type type, string fieldName, object instance = null)
@@ -3539,17 +3770,31 @@ namespace SOLASCustomLevels
 				dict.Add(key, value);
 			return result;
 		}
+
+		public static void Try<T>(this List<T> list, Func<T, (T changed, Func<T, T> undo)> perform, Predicate<T> rollbackIf)
+		{
+			for (int i = 0; i < list.Count; i++)
+			{
+				(list[i], var undoFunction) = perform(list[i]);
+				if (rollbackIf(list[i]))
+				{
+					for (int j = i; j >= 0; j--)
+					{
+						list[i] = undoFunction(list[i]);
+					}
+					return;
+				}
+			}
+		}
 	}
 
 	public static class Unmanaged
 	{
-		public const string UnityWindowClassName = "UnityWndClass";
+		[DllImport("Comdlg32.dll", CharSet = CharSet.Auto)]
+		public static extern bool GetOpenFileName([In, Out] OpenFileNameData fileNameData);
 
 		[DllImport("Comdlg32.dll", CharSet = CharSet.Auto)]
-		public static extern bool GetOpenFileName([In, Out] OpenFileNameData unnamedParam1);
-
-		[DllImport("Comdlg32.dll", CharSet = CharSet.Auto)]
-		public static extern bool GetSaveFileName([In, Out] OpenFileNameData unnamedParam1);
+		public static extern bool GetSaveFileName([In, Out] OpenFileNameData fileNameData);
 
 		[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
 		public class OpenFileNameData
@@ -3591,45 +3836,6 @@ namespace SOLASCustomLevels
 
 		[DllImport("Comdlg32.dll")]
 		public static extern uint CommDlgExtendedError();
-
-		[DllImport("User32.dll", CharSet = CharSet.Auto)]
-		public static extern IntPtr LoadImage(IntPtr? instance, string name, uint type, int cx, int cy, uint fuLoad);
-
-		[DllImport("User32.dll")]
-		public static extern IntPtr SetCursor(IntPtr? cursor);
-
-		[DllImport("Kernel32.dll")]
-		public static extern uint GetCurrentThreadId();
-
-		[DllImport("User32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-		public static extern int GetClassName(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-		public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-		[DllImport("User32.dll")]
-		[return: MarshalAs(UnmanagedType.Bool)]
-		public static extern bool EnumThreadWindows(uint dwThreadId, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-		public static IntPtr GetUnityHINSTANCE()
-		{
-			IntPtr windowHandle = IntPtr.Zero;
-			var threadId = GetCurrentThreadId();
-			EnumThreadWindows(threadId, (hWnd, lParam) =>
-			{
-				var classText = new StringBuilder(UnityWindowClassName.Length + 1);
-				GetClassName(hWnd, classText, classText.Capacity);
-				if (classText.ToString() == UnityWindowClassName)
-				{
-					windowHandle = hWnd;
-					return false;
-				}
-				return true;
-			}, IntPtr.Zero);
-			return windowHandle;
-		}
-
-		[DllImport("User32.dll")]
-		public static extern int ShowCursor([MarshalAs(UnmanagedType.Bool)] bool show);
 	}
 }
 
